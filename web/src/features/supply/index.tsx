@@ -29,11 +29,14 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { supplyRequest, type SupplyResource, type SupplyTarget } from './api'
+import { DirectDeliveryDialog } from './delivery'
 import { AssignmentEditor, ResourceEditor, TargetEditor } from './editor'
 import { SupplyReport } from './report'
 
 type View = {
   kind:
+    | 'delivery'
+    | 'confirm-revocation'
     | 'edit'
     | 'create'
     | 'targets'
@@ -86,6 +89,20 @@ export function SupplyPage() {
     },
     onSuccess: saved,
   })
+  const revoke = useMutation({
+    mutationFn: (r: SupplyResource) =>
+      supplyRequest(`resources/${r.id}/revocation`, 'POST', {
+        revision: r.revision,
+        assignment: r.active_id,
+        upstream_key_revoked: true,
+      }),
+    onSuccess: saved,
+  })
+  const targetLabel = (id: string, uid: number) => {
+    const target = targets.data?.find((v) => v.id === id)
+    const name = target?.mode === 'direct' ? target.url : (target?.name ?? id)
+    return uid ? `${name} / ${uid}` : name
+  }
   const r = view?.resource
   return (
     <>
@@ -123,19 +140,14 @@ export function SupplyPage() {
                 id: 'user',
                 header: t('Target'),
                 cell: (x) =>
-                  x.target
-                    ? `${
-                        targets.data?.find((v) => v.id === x.target)?.name ??
-                        x.target
-                      } / ${x.user_id}`
-                    : '—',
+                  x.target ? targetLabel(x.target, x.user_id) : '—',
               },
               {
                 id: 'effective',
-                header: t('Applied'),
+                header: t('Confirmed target'),
                 cell: (x) =>
                   x.effective
-                    ? `${targets.data?.find((v) => v.id === x.effective?.target)?.name ?? x.effective.target} / ${x.effective.user_id}`
+                    ? targetLabel(x.effective.target, x.effective.user_id)
                     : '—',
               },
               {
@@ -147,6 +159,15 @@ export function SupplyPage() {
                 id: 'status',
                 header: t('Status'),
                 cell: (x) => {
+                  if (x.direct_state === 'await_revocation') {
+                    return t('Awaiting upstream revocation')
+                  }
+                  if (x.direct_state === 'delivered') {
+                    return t('Credentials exported')
+                  }
+                  if (x.direct_state === 'await_delivery' && !x.last_error) {
+                    return t('Ready for handoff')
+                  }
                   if (x.last_error) {
                     return `${t('Sync failed')} · ${t(x.last_error)}`
                   }
@@ -160,6 +181,31 @@ export function SupplyPage() {
                 header: t('Actions'),
                 cell: (x) => (
                   <div className='flex flex-wrap gap-1'>
+                    {user?.role === ROLE.SUPER_ADMIN &&
+                      (x.direct_state === 'await_delivery' ||
+                        x.direct_state === 'delivered') && (
+                        <Button
+                          variant='outline'
+                          size='sm'
+                          onClick={() =>
+                            setView({ kind: 'delivery', resource: x })
+                          }
+                        >
+                          {t('Export credentials')}
+                        </Button>
+                      )}
+                    {x.direct_state === 'await_revocation' &&
+                      (sensitive || x.supplier_id === user?.id) && (
+                        <Button
+                          variant='outline'
+                          size='sm'
+                          onClick={() =>
+                            setView({ kind: 'confirm-revocation', resource: x })
+                          }
+                        >
+                          {t('Confirm upstream revocation')}
+                        </Button>
+                      )}
                     {canWrite && x.last_error && (
                       <Button
                         size='sm'
@@ -269,6 +315,31 @@ export function SupplyPage() {
           targets={targets.data ?? []}
           history={view.kind === 'history'}
           close={close}
+        />
+      )}
+      {r && view?.kind === 'delivery' && (
+        <DirectDeliveryDialog
+          resource={r}
+          targetName={targetLabel(r.target, 0)}
+          close={close}
+          onExport={() =>
+            void qc.invalidateQueries({ queryKey: ['supply', 'resources'] })
+          }
+        />
+      )}
+      {r && view?.kind === 'confirm-revocation' && (
+        <ConfirmDialog
+          open
+          onOpenChange={(v) => {
+            if (!v) close()
+          }}
+          destructive
+          title={t('Confirm upstream revocation')}
+          desc={t(
+            'Confirm that the supplier has disabled the previously exported key.'
+          )}
+          isLoading={revoke.isPending}
+          handleConfirm={() => revoke.mutate(r)}
         />
       )}
       {r && (view?.kind === 'archive' || view?.kind === 'withdraw') && (

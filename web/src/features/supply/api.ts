@@ -32,9 +32,16 @@ export type SupplyResource = {
   applied: number
   archived: boolean
   effective?: { target: string; user_id: number; channel_id: number }
+  direct_state?: string
+  active_id?: string
   last_error: string
 }
-export type SupplyTarget = { id: string; name: string; url: string }
+export type SupplyTarget = {
+  id: string
+  name: string
+  url: string
+  mode?: string
+}
 export type SupplyEvent = {
   id: number
   created: number
@@ -45,6 +52,7 @@ export type SupplyEvent = {
   revision: number
 }
 export type SupplyUsage = {
+  has_windows: boolean
   as_of: number
   complete: boolean
   rows: {

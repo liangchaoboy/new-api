@@ -21,6 +21,7 @@ const (
 	VerificationMethodPassword           = "password"
 	VerificationMethodOAuth              = "oauth"
 	VerificationMethodSession            = "session"
+	VerificationScopeSupplyDelivery      = "supply.key.deliver"
 	VerificationScopeChannelKeyRead      = "channel.key.read"
 	VerificationScopePasskeyRegister     = "passkey.register"
 	VerificationScopePasskeyDelete       = "passkey.delete"
@@ -68,6 +69,11 @@ type VerificationOperation struct {
 	Context json.RawMessage `json:"context,omitempty"`
 }
 
+type SupplyDeliveryContext struct {
+	ResourceID string `json:"resource_id"`
+	Target     string `json:"target"`
+	Revision   int64  `json:"revision"`
+}
 type ChannelKeyReadContext struct {
 	ChannelID int `json:"channel_id"`
 }
@@ -163,6 +169,12 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 	}
 	var normalized any
 	switch operation.Scope {
+	case VerificationScopeSupplyDelivery:
+		var ctx SupplyDeliveryContext
+		if len(fields) != 3 || common.Unmarshal(operation.Context, &ctx) != nil || len(ctx.ResourceID) != 32 || len(ctx.Target) != 32 || ctx.Revision <= 0 || strings.Trim(ctx.ResourceID+ctx.Target, "0123456789abcdef") != "" {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		normalized = ctx
 	case VerificationScopeChannelKeyRead:
 		var context ChannelKeyReadContext
 		if len(fields) != 1 || common.Unmarshal(fields["channel_id"], &context.ChannelID) != nil || context.ChannelID <= 0 {
@@ -319,7 +331,7 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 		methods = append(methods, VerificationMethodPasskey)
 	}
 	switch scope {
-	case VerificationScopeChannelKeyRead, VerificationScopePasskeyDelete, VerificationScopeLogin:
+	case VerificationScopeSupplyDelivery, VerificationScopeChannelKeyRead, VerificationScopePasskeyDelete, VerificationScopeLogin:
 	case VerificationScopeTwoFADisable, VerificationScopeTwoFABackupCodes:
 		if !state.HasTwoFA {
 			return nil, model.ErrTwoFANotEnabled
@@ -375,7 +387,7 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	if state.Status != common.UserStatusEnabled || state.AuthVersion != identity.UserAuthVersion {
 		return nil, ErrAuthTokenInvalid
 	}
-	if scope == VerificationScopeChannelKeyRead && state.Role != common.RoleRootUser {
+	if (scope == VerificationScopeChannelKeyRead || scope == VerificationScopeSupplyDelivery) && state.Role != common.RoleRootUser {
 		return nil, ErrVerificationForbidden
 	}
 	if strings.HasPrefix(scope, verificationScopeAdminUserPrefix) && state.Role < common.RoleAdminUser {

@@ -145,17 +145,28 @@ export function TargetEditor(props: {
 }) {
   const { t } = useTranslation()
   const form = useForm({
-    defaultValues: { id: '', name: '', url: '', token: '' },
+    defaultValues: { id: '', url: '', username: '', password: '', token: '' },
   })
   const id = form.watch('id')
+  const legacy =
+    !!id && props.targets.find((target) => target.id === id)?.mode !== 'direct'
   const save = useMutation({
-    mutationFn: (v: { id: string; name: string; url: string; token: string }) =>
-      supplyRequest(
+    gcTime: 0,
+    retry: false,
+    mutationFn: () => {
+      const v = form.getValues()
+      return supplyRequest(
         v.id ? `targets/${v.id}` : 'targets',
         v.id ? 'PUT' : 'POST',
-        v
-      ),
-    onSuccess: props.saved,
+        legacy
+          ? { token: v.token }
+          : { url: v.url, username: v.username, password: v.password }
+      )
+    },
+    onSuccess: () => {
+      form.reset()
+      props.saved()
+    },
   })
   return (
     <Dialog
@@ -167,7 +178,7 @@ export function TargetEditor(props: {
     >
       <form
         className='grid gap-4'
-        onSubmit={form.handleSubmit((v) => save.mutate(v))}
+        onSubmit={form.handleSubmit(() => save.mutate())}
       >
         <Label>
           {t('Target')}
@@ -175,31 +186,54 @@ export function TargetEditor(props: {
             <NativeSelectOption value=''>{t('Create')}</NativeSelectOption>
             {props.targets.map((row) => (
               <NativeSelectOption key={row.id} value={row.id}>
-                {row.name}
+                {row.mode === 'direct' ? row.url : row.name}
               </NativeSelectOption>
             ))}
           </NativeSelect>
         </Label>
         {!id && (
+          <Label>
+            {t('Base URL')}
+            <Input
+              type='url'
+              required
+              autoComplete='url'
+              {...form.register('url')}
+            />
+          </Label>
+        )}
+        {legacy ? (
+          <Label>
+            {t('Access token')}
+            <PasswordInput
+              required
+              autoComplete='new-password'
+              {...form.register('token')}
+            />
+          </Label>
+        ) : (
           <>
             <Label>
-              {t('Name')}
-              <Input required maxLength={128} {...form.register('name')} />
+              {t('Username')}
+              <Input
+                required
+                autoComplete='off'
+                {...form.register('username')}
+              />
             </Label>
             <Label>
-              {t('Base URL')}
-              <Input type='url' required {...form.register('url')} />
+              {t('Password')}
+              <PasswordInput
+                required
+                autoComplete='new-password'
+                {...form.register('password')}
+              />
             </Label>
+            <p className='text-muted-foreground text-sm'>
+              {t('The account is verified once. Its password is not stored.')}
+            </p>
           </>
         )}
-        <Label>
-          {t('Access token')}
-          <PasswordInput
-            required
-            autoComplete='new-password'
-            {...form.register('token')}
-          />
-        </Label>
         <Button type='submit' disabled={save.isPending}>
           {t('Save')}
         </Button>
@@ -219,10 +253,15 @@ export function AssignmentEditor(props: {
   const form = useForm({
     defaultValues: { target: r.target, user_id: r.user_id || undefined },
   })
+  const selectedTarget = form.watch('target')
+  const direct =
+    props.targets.find((x) => x.id === selectedTarget)?.mode === 'direct'
   const save = useMutation({
     mutationFn: (v: { target: string; user_id: number | undefined }) =>
       supplyRequest(`resources/${r.id}/assignment`, 'PUT', {
         ...v,
+        user_id: direct ? 0 : v.user_id,
+        scope: direct ? 'instance' : 'user',
         revision: r.revision,
       }),
     onSuccess: props.saved,
@@ -245,21 +284,29 @@ export function AssignmentEditor(props: {
             <NativeSelectOption value=''>—</NativeSelectOption>
             {props.targets.map((row) => (
               <NativeSelectOption key={row.id} value={row.id}>
-                {row.name}
+                {row.mode === 'direct' ? row.url : row.name}
               </NativeSelectOption>
             ))}
           </NativeSelect>
         </Label>
-        <Label>
-          {t('User ID')}
-          <Input
-            required
-            type='number'
-            min='1'
-            step='1'
-            {...form.register('user_id', { valueAsNumber: true })}
-          />
-        </Label>
+        {direct ? (
+          <p className='text-muted-foreground text-sm'>
+            {t(
+              'Assign to this customer instance. Its administrator installs the upstream credentials.'
+            )}
+          </p>
+        ) : (
+          <Label>
+            {t('User ID')}
+            <Input
+              required
+              type='number'
+              min='1'
+              step='1'
+              {...form.register('user_id', { valueAsNumber: true })}
+            />
+          </Label>
+        )}
         <Button type='submit' disabled={save.isPending}>
           {t('Save')}
         </Button>

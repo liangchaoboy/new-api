@@ -85,14 +85,12 @@ it('opens the creation form from the supplier channel list', async () => {
 
 it('shows reports and hides channel changes for a read-only admin viewing another supplier', async () => {
   const { SupplyPage } = await import('../index')
-  useAuthStore
-    .getState()
-    .auth.setUser({
-      id: 8,
-      username: 'reader',
-      role: 10,
-      permissions: { admin_permissions: { channel: { read: true } } },
-    })
+  useAuthStore.getState().auth.setUser({
+    id: 8,
+    username: 'reader',
+    role: 10,
+    permissions: { admin_permissions: { channel: { read: true } } },
+  })
   try {
     vi.mocked(supplyRequest).mockImplementation(async (path) =>
       path === 'targets'
@@ -126,4 +124,85 @@ it('shows reports and hides channel changes for a read-only admin viewing anothe
   } finally {
     useAuthStore.getState().auth.setUser(null)
   }
+})
+
+it('registers a direct instance using its URL and ordinary account without asking for a token', async () => {
+  const { TargetEditor } = await import('../editor')
+  const user = userEvent.setup()
+  const saved = vi.fn()
+  vi.mocked(supplyRequest).mockResolvedValue({ id: 'target' })
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <TargetEditor targets={[]} close={vi.fn()} saved={saved} />
+    </QueryClientProvider>
+  )
+  await user.type(
+    screen.getByRole('textbox', { name: 'Base URL' }),
+    'https://customer.example'
+  )
+  await user.type(screen.getByRole('textbox', { name: 'Username' }), 'partner')
+  await user.type(
+    screen.getByLabelText('Password', { selector: 'input' }),
+    'fixture-only'
+  )
+  expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save' }))
+  await waitFor(() => expect(saved).toHaveBeenCalledOnce())
+  expect(supplyRequest).toHaveBeenCalledWith('targets', 'POST', {
+    url: 'https://customer.example',
+    username: 'partner',
+    password: 'fixture-only',
+  })
+})
+
+it('assigns a standard customer instance without a downstream UID', async () => {
+  const { AssignmentEditor } = await import('../editor')
+  const user = userEvent.setup()
+  const saved = vi.fn()
+  vi.mocked(supplyRequest).mockResolvedValue(null)
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AssignmentEditor
+        targets={[
+          {
+            id: 'target',
+            name: 'customer',
+            url: 'https://customer.example',
+            mode: 'direct',
+          },
+        ]}
+        resource={{
+          id: 'c',
+          supplier_id: 1,
+          name: 'Channel',
+          models: 'm',
+          type: 1,
+          base_url: '',
+          target: '',
+          user_id: 0,
+          revision: 1,
+          applied: 1,
+          archived: false,
+          last_error: '',
+        }}
+        close={vi.fn()}
+        saved={saved}
+      />
+    </QueryClientProvider>
+  )
+  await user.selectOptions(
+    screen.getByRole('combobox', { name: 'Target' }),
+    'target'
+  )
+  expect(
+    screen.queryByRole('spinbutton', { name: 'User ID' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save' }))
+  await waitFor(() => expect(saved).toHaveBeenCalledOnce())
+  expect(supplyRequest).toHaveBeenCalledWith('resources/c/assignment', 'PUT', {
+    target: 'target',
+    user_id: 0,
+    revision: 1,
+    scope: 'instance',
+  })
 })

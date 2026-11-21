@@ -175,14 +175,32 @@ func ReconcileSupply(ctx context.Context, id string) error {
 	var assignment model.SupplyAssignment
 	var command model.SupplyCommand
 	err := model.EditSupply(id, 0, func(tx *gorm.DB, r *model.SupplyResource) error {
-		if r.Applied == r.Revision {
+		if r.Applied == r.Revision || r.DirectState == model.SupplyAwaitDelivery || r.DirectState == model.SupplyAwaitRevocation {
 			return nil
 		}
 		if r.ActiveID == "" {
+			if r.Target != "" && r.Secret == "" {
+				r.LastError = ErrDedicatedKey.Error()
+				return nil
+			}
 			if r.Target == "" {
 				r.Applied = r.Revision
 				r.LastError = ""
 				return nil
+			}
+			if r.UserID > 0 {
+				key, err := openSupplySecret("resource/"+r.ID, r.Secret)
+				if err != nil {
+					return err
+				}
+				var used int64
+				if err := tx.Model(&model.SupplyAssignment{}).Where("key_ref = ?", common.GenerateHMAC(key)).Count(&used).Error; err != nil {
+					return err
+				}
+				if used > 0 {
+					r.LastError = ErrDedicatedKey.Error()
+					return nil
+				}
 			}
 			assignment = model.SupplyAssignment{ID: common.GetUUID(), ResourceID: r.ID, Target: r.Target, UserID: r.UserID, Started: common.GetTimestamp()}
 			if err := tx.Create(&assignment).Error; err != nil {
@@ -192,7 +210,28 @@ func ReconcileSupply(ctx context.Context, id string) error {
 		} else if err := tx.First(&assignment, "id = ?", r.ActiveID).Error; err != nil {
 			return err
 		}
-		command = model.SupplyCommand{Version: r.Revision, UserID: assignment.UserID, Retire: assignment.Retiring || assignment.Target != r.Target || assignment.UserID != r.UserID, Config: r.SupplyConfig}
+		retire := assignment.Retiring || assignment.Target != r.Target || assignment.UserID != r.UserID
+		if assignment.UserID == 0 {
+			if !retire {
+				r.DirectState = model.SupplyAwaitDelivery
+				return nil
+			}
+			if assignment.KeyRef != nil {
+				r.DirectState = model.SupplyAwaitRevocation
+				return tx.Model(&assignment).Update("retiring", true).Error
+			}
+			// Nothing was disclosed, so this reservation can be closed locally.
+			if err := tx.Model(&assignment).Update("ended", common.GetTimestamp()).Error; err != nil {
+				return err
+			}
+			r.ActiveID = ""
+			r.DirectState = ""
+			if r.Target == "" {
+				r.Applied = r.Revision
+			}
+			return model.SupplyAudit(tx, r, 0, "withdrawn", assignment.Target, 0)
+		}
+		command = model.SupplyCommand{Version: r.Revision, UserID: assignment.UserID, Retire: retire, Config: r.SupplyConfig}
 		if command.Retire {
 			return tx.Model(&assignment).Update("retiring", true).Error
 		}
@@ -267,7 +306,7 @@ func CollectSupplyWindow(ctx context.Context, a model.SupplyAssignment, day int6
 func SyncSupplyResources() {
 	for {
 		var ids []string
-		if err := model.DB.Model(&model.SupplyResource{}).Where("applied < revision").Pluck("id", &ids).Error; err == nil {
+		if err := model.DB.Model(&model.SupplyResource{}).Where("applied < revision AND (direct_state IS NULL OR direct_state = ?)", "").Pluck("id", &ids).Error; err == nil {
 			for _, id := range ids {
 				if err := ReconcileSupply(context.Background(), id); err != nil {
 					common.SysError(common.LogText("supplier distribution failed for resource %s", id))

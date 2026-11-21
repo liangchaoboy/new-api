@@ -21,7 +21,15 @@ type SupplyConfig struct {
 	Models  string `json:"models" gorm:"type:text"`
 }
 
+const (
+	SupplyTargetDirect    = "direct"
+	SupplyAwaitDelivery   = "await_delivery"
+	SupplyDelivered       = "delivered"
+	SupplyAwaitRevocation = "await_revocation"
+)
+
 type SupplyResource struct {
+	DirectState  string `json:"direct_state,omitempty" gorm:"size:32"`
 	ID           string `json:"id" gorm:"primaryKey;size:32"`
 	SupplierID   int    `json:"supplier_id" gorm:"index"`
 	SupplyConfig `gorm:"embedded"`
@@ -37,15 +45,18 @@ type SupplyResource struct {
 }
 
 type SupplyAssignment struct {
-	ID         string `json:"id" gorm:"primaryKey;size:32"`
-	ResourceID string `json:"resource_id" gorm:"size:32;index"`
-	Target     string `json:"target" gorm:"size:96"`
-	UserID     int    `json:"user_id"`
-	ChannelID  int    `json:"channel_id"`
-	Started    int64  `json:"started"`
-	Ended      int64  `json:"ended"`
-	NextDay    int64  `json:"-"`
-	Retiring   bool   `json:"retiring"`
+	KeyRef        *string `json:"-" gorm:"size:64;uniqueIndex"`
+	ProviderQuota *int64  `json:"provider_quota,omitempty"`
+	QuotaAt       int64   `json:"quota_at,omitempty"`
+	ID            string  `json:"id" gorm:"primaryKey;size:32"`
+	ResourceID    string  `json:"resource_id" gorm:"size:32;index"`
+	Target        string  `json:"target" gorm:"size:96"`
+	UserID        int     `json:"user_id"`
+	ChannelID     int     `json:"channel_id"`
+	Started       int64   `json:"started"`
+	Ended         int64   `json:"ended"`
+	NextDay       int64   `json:"-"`
+	Retiring      bool    `json:"retiring"`
 }
 type SupplyEvent struct {
 	ID         int64  `json:"id" gorm:"primaryKey"`
@@ -232,11 +243,13 @@ func (cfg SupplyConfig) Valid() bool {
 }
 
 type SupplyTarget struct {
-	Issuer int    `json:"-"`
-	ID     string `json:"id" gorm:"primaryKey;size:32"`
-	Name   string `json:"name" gorm:"size:128"`
-	URL    string `json:"url" gorm:"size:512"`
-	Secret string `json:"-" gorm:"type:text"`
+	Mode       string  `json:"mode,omitempty" gorm:"size:16"`
+	AddressRef *string `json:"-" gorm:"size:64;uniqueIndex"`
+	Issuer     int     `json:"-"`
+	ID         string  `json:"id" gorm:"primaryKey;size:32"`
+	Name       string  `json:"name" gorm:"size:128"`
+	URL        string  `json:"url" gorm:"size:512"`
+	Secret     string  `json:"-" gorm:"type:text"`
 }
 
 func StoreSupplyWindow(w *SupplyWindow) error {

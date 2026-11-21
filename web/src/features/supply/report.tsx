@@ -74,7 +74,25 @@ export function SupplyReport(props: {
     queryFn: () => supplyRequest<SupplyEvent[]>(`${base}history`),
     enabled: props.history,
   })
+  const provider = useQuery({
+    queryKey: ['supply', 'provider-usage', viewer, id],
+    queryFn: () =>
+      supplyRequest<
+        {
+          target: string
+          total_used: number | null
+          as_of: number
+          current: boolean
+        }[]
+      >(`${base}provider-usage`),
+    enabled: !props.history,
+  })
+  const showManaged =
+    usage.data?.has_windows ||
+    (!provider.data?.length && !props.resource.direct_state)
   const actionNames: Record<string, string> = {
+    key_exported: t('Credentials exported'),
+    revocation_confirmed: t('Upstream revocation confirmed'),
     created: t('Created'),
     updated: t('Updated'),
     archived: t('Archived'),
@@ -130,123 +148,184 @@ export function SupplyReport(props: {
         />
       ) : (
         <div className='grid gap-4'>
-          <div className='grid gap-3 sm:grid-cols-3'>
-            <Label>
-              {t('Start date')} (UTC)
-              <Input
-                type='date'
-                value={from}
-                max={to}
-                onChange={(e) => setFrom(e.target.value)}
-              />
-            </Label>
-            <Label>
-              {t('End date')} (UTC)
-              <Input
-                type='date'
-                value={to}
-                min={from}
-                max={today}
-                onChange={(e) => setTo(e.target.value)}
-              />
-            </Label>
-            <Label>
-              {t('User ID')}
-              <Input
-                type='number'
-                min='1'
-                value={uid}
-                onChange={(e) => setUid(e.target.value)}
-              />
-            </Label>
-            <Label>
-              {t('Model')}
-              <Input value={model} onChange={(e) => setModel(e.target.value)} />
-            </Label>
-            <Label>
-              {t('Target')}
-              <Input
-                list='supply-report-targets'
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-              />
-              <datalist id='supply-report-targets'>
-                {props.targets.map((x) => (
-                  <option key={x.id} value={x.id}>
-                    {x.name}
-                  </option>
-                ))}
-              </datalist>
-            </Label>
-            <Button
-              disabled={!valid || usage.isFetching}
-              onClick={() => void usage.refetch()}
-            >
-              {t('Refresh')}
-            </Button>
-          </div>
-          {!valid && <p>{t('Select up to 31 UTC days')}</p>}
-          {usage.data && !usage.data.complete && (
-            <p role='status'>{t('Usage data is incomplete')}</p>
-          )}
-          {usage.data && usage.data.as_of > 0 && (
+          {!showManaged && !provider.data?.length && (
             <p>
-              {t('Last updated')} ·{' '}
-              {new Date(usage.data.as_of * 1000).toLocaleString(locale)}
+              {provider.isPending ? t('Loading...') : t('Usage unavailable')}
             </p>
           )}
-          {usage.data && (usage.data.complete || rows.length > 0) && (
-            <p>
-              {t('Total')} · {t('Records')}{' '}
-              {formatNumber(
-                rows.reduce((n, r) => n + r.records, 0),
-                locale
-              )}{' '}
-              · {t('Input tokens')}{' '}
-              {formatNumber(
-                rows.reduce((n, r) => n + r.input_tokens, 0),
-                locale
-              )}{' '}
-              · {t('Output tokens')}{' '}
-              {formatNumber(
-                rows.reduce((n, r) => n + r.output_tokens, 0),
-                locale
+          {!!provider.data?.length && (
+            <section className='grid gap-2'>
+              <h3>{t('Provider key usage')}</h3>
+              <p>
+                {t(
+                  'Lifetime quota reported by the provider for this dedicated key.'
+                )}
+              </p>
+              <StaticDataTable
+                data={provider.data}
+                columns={[
+                  {
+                    id: 'target',
+                    header: t('Target'),
+                    cell: (r) => targetName(r.target),
+                  },
+                  {
+                    id: 'quota',
+                    header: t('Used Quota'),
+                    cell: (r) =>
+                      r.total_used === null
+                        ? t('Usage unavailable')
+                        : formatNumber(r.total_used, locale),
+                  },
+                  {
+                    id: 'at',
+                    header: t('Last updated'),
+                    cell: (r) =>
+                      r.as_of
+                        ? new Date(r.as_of * 1000).toLocaleString(locale)
+                        : '—',
+                  },
+                  {
+                    id: 'status',
+                    header: t('Status'),
+                    cell: (r) => (r.current ? t('Current') : t('Last known')),
+                  },
+                ]}
+              />
+              <Button
+                variant='outline'
+                disabled={provider.isFetching}
+                onClick={() => void provider.refetch()}
+              >
+                {t('Refresh')}
+              </Button>
+            </section>
+          )}
+          {showManaged && (
+            <>
+              <div className='grid gap-3 sm:grid-cols-3'>
+                <Label>
+                  {t('Start date')} (UTC)
+                  <Input
+                    type='date'
+                    value={from}
+                    max={to}
+                    onChange={(e) => setFrom(e.target.value)}
+                  />
+                </Label>
+                <Label>
+                  {t('End date')} (UTC)
+                  <Input
+                    type='date'
+                    value={to}
+                    min={from}
+                    max={today}
+                    onChange={(e) => setTo(e.target.value)}
+                  />
+                </Label>
+                <Label>
+                  {t('User ID')}
+                  <Input
+                    type='number'
+                    min='1'
+                    value={uid}
+                    onChange={(e) => setUid(e.target.value)}
+                  />
+                </Label>
+                <Label>
+                  {t('Model')}
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                </Label>
+                <Label>
+                  {t('Target')}
+                  <Input
+                    list='supply-report-targets'
+                    value={target}
+                    onChange={(e) => setTarget(e.target.value)}
+                  />
+                  <datalist id='supply-report-targets'>
+                    {props.targets.map((x) => (
+                      <option key={x.id} value={x.id}>
+                        {x.name}
+                      </option>
+                    ))}
+                  </datalist>
+                </Label>
+                <Button
+                  disabled={!valid || usage.isFetching}
+                  onClick={() => void usage.refetch()}
+                >
+                  {t('Refresh')}
+                </Button>
+              </div>
+              {!valid && <p>{t('Select up to 31 UTC days')}</p>}
+              {usage.data && !usage.data.complete && (
+                <p role='status'>{t('Usage data is incomplete')}</p>
               )}
-            </p>
+              {usage.data && usage.data.as_of > 0 && (
+                <p>
+                  {t('Last updated')} ·{' '}
+                  {new Date(usage.data.as_of * 1000).toLocaleString(locale)}
+                </p>
+              )}
+              {usage.data && (usage.data.complete || rows.length > 0) && (
+                <p>
+                  {t('Total')} · {t('Records')}{' '}
+                  {formatNumber(
+                    rows.reduce((n, r) => n + r.records, 0),
+                    locale
+                  )}{' '}
+                  · {t('Input tokens')}{' '}
+                  {formatNumber(
+                    rows.reduce((n, r) => n + r.input_tokens, 0),
+                    locale
+                  )}{' '}
+                  · {t('Output tokens')}{' '}
+                  {formatNumber(
+                    rows.reduce((n, r) => n + r.output_tokens, 0),
+                    locale
+                  )}
+                </p>
+              )}
+              <StaticDataTable
+                data={rows}
+                emptyContent={usage.isFetching ? t('Loading...') : t('No data')}
+                columns={[
+                  {
+                    id: 'day',
+                    header: 'UTC',
+                    cell: (r) =>
+                      new Date(r.day * 1000).toISOString().slice(0, 10),
+                  },
+                  {
+                    id: 'target',
+                    header: t('Target'),
+                    cell: (r) => targetName(r.target),
+                  },
+                  { id: 'uid', header: t('User ID'), cell: (r) => r.user_id },
+                  { id: 'model', header: t('Model'), cell: (r) => r.model },
+                  {
+                    id: 'records',
+                    header: t('Records'),
+                    cell: (r) => formatNumber(r.records, locale),
+                  },
+                  {
+                    id: 'in',
+                    header: t('Input tokens'),
+                    cell: (r) => formatNumber(r.input_tokens, locale),
+                  },
+                  {
+                    id: 'out',
+                    header: t('Output tokens'),
+                    cell: (r) => formatNumber(r.output_tokens, locale),
+                  },
+                ]}
+              />
+            </>
           )}
-          <StaticDataTable
-            data={rows}
-            emptyContent={usage.isFetching ? t('Loading...') : t('No data')}
-            columns={[
-              {
-                id: 'day',
-                header: 'UTC',
-                cell: (r) => new Date(r.day * 1000).toISOString().slice(0, 10),
-              },
-              {
-                id: 'target',
-                header: t('Target'),
-                cell: (r) => targetName(r.target),
-              },
-              { id: 'uid', header: t('User ID'), cell: (r) => r.user_id },
-              { id: 'model', header: t('Model'), cell: (r) => r.model },
-              {
-                id: 'records',
-                header: t('Records'),
-                cell: (r) => formatNumber(r.records, locale),
-              },
-              {
-                id: 'in',
-                header: t('Input tokens'),
-                cell: (r) => formatNumber(r.input_tokens, locale),
-              },
-              {
-                id: 'out',
-                header: t('Output tokens'),
-                cell: (r) => formatNumber(r.output_tokens, locale),
-              },
-            ]}
-          />
         </div>
       )}
     </Dialog>

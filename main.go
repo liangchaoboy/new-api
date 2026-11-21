@@ -145,6 +145,7 @@ func main() {
 	go controller.SyncTaskPlugins()
 	if common.IsMasterNode {
 		go service.SyncSupplyResources()
+		go service.SyncDirectProviderUsage()
 		go service.SyncSupplyUsage()
 		go service.SyncRetiredSupplyUsage()
 	}

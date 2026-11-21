@@ -678,3 +678,115 @@ func TestSupplyRealtimeRevocation(t *testing.T) {
 	_, _, err = source.ReadMessage()
 	require.Error(t, err)
 }
+
+func TestDirectSupplyCustomerHandoff(t *testing.T) {
+	owner := setupChannelCreateTest(t)
+	db := model.DB
+	t.Setenv("CRYPTO_SECRET", "direct-test-only")
+	require.NoError(t, db.AutoMigrate(&model.SupplyResource{}, &model.SupplyAssignment{}, &model.SupplyTarget{}, &model.SupplyEvent{}))
+	r := model.SupplyResource{ID: common.GetUUID(), SupplierID: owner, Revision: 1, Applied: 1, SupplyConfig: model.SupplyConfig{Name: "direct-test", Type: constant.ChannelTypeNewAPI, Models: "demo", BaseURL: "https://supply.example.org"}}
+	oldKey := common.GetUUID()
+	var err error
+	r.Secret, err = service.SealSupplySecret("resource/"+r.ID, oldKey)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&r).Error)
+	t1 := model.SupplyTarget{ID: common.GetUUID(), Name: "one", Mode: model.SupplyTargetDirect}
+	t2 := model.SupplyTarget{ID: common.GetUUID(), Name: "two", Mode: model.SupplyTargetDirect}
+	require.NoError(t, db.Create(&t1).Error)
+	require.NoError(t, db.Create(&t2).Error)
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("resource_id = ?", r.ID).Delete(&model.SupplyAssignment{}).Error)
+		require.NoError(t, db.Where("resource_id = ?", r.ID).Delete(&model.SupplyEvent{}).Error)
+		require.NoError(t, db.Delete(&r).Error)
+		require.NoError(t, db.Delete(&t1).Error)
+		require.NoError(t, db.Delete(&t2).Error)
+	})
+	assign := func(target string, rev int64, uid int) bool {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Set("role", common.RoleRootUser)
+		c.Set("id", owner)
+		c.Params = gin.Params{{Key: "id", Value: r.ID}}
+		c.Request = httptest.NewRequest("PUT", "/", strings.NewReader(fmt.Sprintf(`{"scope":"instance","target":%q,"revision":%d,"user_id":%d}`, target, rev, uid)))
+		AssignSupply(c)
+		return strings.Contains(rec.Body.String(), `"success":true`)
+	}
+	assert.False(t, assign(t1.ID, 1, owner))
+	require.True(t, assign(t1.ID, 1, 0))
+	require.NoError(t, service.ReconcileSupply(t.Context(), r.ID))
+	op := service.SupplyDeliveryContext{ResourceID: r.ID, Target: t1.ID, Revision: 2}
+	out, err := service.ExportSupplyDelivery(op, owner)
+	require.NoError(t, err)
+	assert.Equal(t, oldKey, out.Key)
+	out, err = service.ExportSupplyDelivery(op, owner)
+	require.NoError(t, err)
+	assert.Equal(t, r.BaseURL, out.BaseURL)
+	require.True(t, assign(t2.ID, 2, 0))
+	require.NoError(t, service.ReconcileSupply(t.Context(), r.ID))
+	var pending model.SupplyResource
+	require.NoError(t, db.First(&pending, "id = ?", r.ID).Error)
+	assert.Equal(t, model.SupplyAwaitRevocation, pending.DirectState)
+	_, err = service.ExportSupplyDelivery(op, owner)
+	require.ErrorIs(t, err, model.ErrSupplyConflict)
+	require.ErrorIs(t, service.ConfirmSupplyRevocation(r.ID, pending.ActiveID, 2, owner, owner), model.ErrSupplyConflict)
+	require.NoError(t, service.ConfirmSupplyRevocation(r.ID, pending.ActiveID, 3, owner, owner))
+	require.NoError(t, db.Model(&r).Update("secret", r.Secret).Error)
+	require.NoError(t, service.ReconcileSupply(t.Context(), r.ID))
+	op.Target = t2.ID
+	op.Revision = 3
+	_, err = service.ExportSupplyDelivery(op, owner)
+	require.ErrorIs(t, err, service.ErrDedicatedKey)
+	newKey, err := service.SealSupplySecret("resource/"+r.ID, "new-"+oldKey)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&r).Update("secret", newKey).Error)
+	out, err = service.ExportSupplyDelivery(op, owner)
+	require.NoError(t, err)
+	assert.Equal(t, "new-"+oldKey, out.Key)
+}
+
+func TestDirectSupplyOrdinaryAccountRegistration(t *testing.T) {
+	setupChannelCreateTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.SupplyTarget{}))
+	uid := 7
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/status":
+			fmt.Fprint(w, `{"success":true,"data":{}}`)
+		case "/api/user/login":
+			fmt.Fprintf(w, `{"success":true,"data":{"user":{"id":%d},"access_token":"fixture-session"}}`, uid)
+		case "/api/user/self":
+			fmt.Fprintf(w, `{"success":true,"data":{"id":%d,"username":"ordinary","role":1}}`, uid)
+		case "/api/user/auth/logout":
+			fmt.Fprint(w, `{"success":true}`)
+		default:
+			t.Errorf("unexpected downstream operation %s", r.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer site.Close()
+	save := func(id string) bool {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Params = gin.Params{{Key: "id", Value: id}}
+		payload, err := common.Marshal(map[string]string{"url": site.URL + "/", "username": "ordinary", "password": "fixture-password"})
+		require.NoError(t, err)
+		c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+		SaveSupplyTarget(c)
+		assert.NotContains(t, rec.Body.String(), "fixture-password")
+		assert.NotContains(t, rec.Body.String(), "fixture-session")
+		return strings.Contains(rec.Body.String(), `"success":true`)
+	}
+	require.True(t, save(""))
+	var target model.SupplyTarget
+	require.NoError(t, model.DB.First(&target, "url = ?", site.URL).Error)
+	t.Cleanup(func() { require.NoError(t, model.DB.Delete(&target).Error) })
+	assert.Equal(t, model.SupplyTargetDirect, target.Mode)
+	assert.Empty(t, target.Secret)
+	assert.Equal(t, uid, target.Issuer)
+	assert.False(t, save(""))
+	uid++
+	require.True(t, save(target.ID))
+	require.NoError(t, model.DB.First(&target, "id = ?", target.ID).Error)
+	assert.Equal(t, uid, target.Issuer)
+	assert.Empty(t, target.Secret)
+}

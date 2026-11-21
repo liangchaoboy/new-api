@@ -1,12 +1,16 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -24,10 +28,14 @@ func supplyOwnerScope(c *gin.Context, permission authz.Permission) int {
 	return id
 }
 
+var errDirectRevokeFirst = errors.New("Revoke the delivered key first")
+
 var errSupplyForbidden = errors.New("insufficient privileges")
 
 func supplyError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, errDirectRevokeFirst):
+		common.ApiErrorT(c, errDirectRevokeFirst.Error())
 	case errors.Is(err, errSupplyForbidden):
 		common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
 	case errors.Is(err, model.ErrSupplyInput):
@@ -50,14 +58,75 @@ func SupplyTargets(c *gin.Context) {
 	common.ApiSuccess(c, targets)
 }
 func SaveSupplyTarget(c *gin.Context) {
-	var req struct{ Name, URL, Token string }
-	if c.ShouldBindJSON(&req) != nil || len(req.Token) > 8192 || req.Token == "" {
+	var req struct{ Name, URL, Token, Username, Password string }
+	if c.ShouldBindJSON(&req) != nil || len(req.Token) > 8192 || len(req.Password) > 2048 || len(req.Username) > 200 {
 		supplyError(c, model.ErrSupplyInput)
 		return
 	}
 	id := c.Param("id")
 	if id == "" {
 		id = common.GetUUID()
+	}
+	if req.Username != "" || req.Password != "" {
+		if req.Token != "" {
+			supplyError(c, model.ErrSupplyInput)
+			return
+		}
+		var target model.SupplyTarget
+		var err error
+		if c.Param("id") != "" {
+			if err := model.DB.First(&target, "id = ?", id).Error; err != nil {
+				supplyError(c, err)
+				return
+			}
+			if target.Mode != model.SupplyTargetDirect {
+				supplyError(c, model.ErrSupplyConflict)
+				return
+			}
+		} else {
+			target.ID = id
+			target.Mode = model.SupplyTargetDirect
+			target.URL, err = service.DirectSupplyAddress(req.URL)
+			if err != nil {
+				supplyError(c, model.ErrSupplyInput)
+				return
+			}
+			target.Name = strings.TrimSpace(req.Name)
+			if target.Name == "" {
+				u, _ := url.Parse(target.URL)
+				target.Name = u.Host
+			}
+			if len(target.Name) > 128 {
+				supplyError(c, model.ErrSupplyInput)
+				return
+			}
+			sum := sha256.Sum256([]byte(target.URL))
+			ref := hex.EncodeToString(sum[:])
+			target.AddressRef = &ref
+		}
+		uid, err := service.VerifySupplyAccount(c.Request.Context(), target.URL, strings.TrimSpace(req.Username), req.Password)
+		if err != nil {
+			common.ApiErrorT(c, err.Error())
+			return
+		}
+		if c.Param("id") == "" {
+			target.Issuer = uid
+			err = model.DB.Create(&target).Error
+		} else {
+			// The customer is bound by site address. A new verified contact
+			// account at the same site does not transfer any assignment.
+			err = model.DB.Model(&target).Update("issuer", uid).Error
+		}
+		if err != nil {
+			supplyError(c, err)
+			return
+		}
+		common.ApiSuccess(c, gin.H{"id": id})
+		return
+	}
+	if req.Token == "" {
+		supplyError(c, model.ErrSupplyInput)
+		return
 	}
 	secret, err := service.SealSupplySecret("target/"+id, req.Token)
 	if err != nil {
@@ -78,6 +147,10 @@ func SaveSupplyTarget(c *gin.Context) {
 	} else {
 		if err = model.DB.First(&target, "id = ?", id).Error; err != nil {
 			supplyError(c, err)
+			return
+		}
+		if target.Mode == model.SupplyTargetDirect {
+			supplyError(c, model.ErrSupplyInput)
 			return
 		}
 		issuer, probeErr := service.CheckSupplyCredential(c.Request.Context(), target, req.Token)
@@ -116,7 +189,7 @@ func ListSupplyResources(c *gin.Context) {
 	}
 	if len(ids) > 0 {
 		var current []model.SupplyAssignment
-		if err := model.DB.Where("id IN ? AND channel_id > 0 AND ended = 0", ids).Find(&current).Error; err != nil {
+		if err := model.DB.Where("id IN ? AND (channel_id > 0 OR key_ref IS NOT NULL) AND ended = 0", ids).Find(&current).Error; err != nil {
 			supplyError(c, err)
 			return
 		}
@@ -178,6 +251,16 @@ func SaveSupplyResource(c *gin.Context) {
 			if r.SupplierID != actor && (req.Key != "" || req.BaseURL != r.BaseURL || req.Type != r.Type) && !canEditSecrets {
 				return errSupplyForbidden
 			}
+			if r.ActiveID != "" {
+				var assignment model.SupplyAssignment
+				if err := tx.First(&assignment, "id = ?", r.ActiveID).Error; err != nil {
+					return err
+				}
+				if assignment.KeyRef != nil && (req.Key != "" && common.GenerateHMAC(req.Key) != *assignment.KeyRef || r.BaseURL != req.BaseURL || r.Type != req.Type) {
+					return errDirectRevokeFirst
+				}
+			}
+			r.DirectState = ""
 			r.SupplyConfig = req.SupplyConfig
 			if secret != "" {
 				r.Secret = secret
@@ -196,11 +279,12 @@ func SaveSupplyResource(c *gin.Context) {
 
 func AssignSupply(c *gin.Context) {
 	var req struct {
+		Scope    string `json:"scope"`
 		Target   string `json:"target"`
 		UserID   int    `json:"user_id"`
 		Revision int64  `json:"revision"`
 	}
-	if c.ShouldBindJSON(&req) != nil || req.UserID < 0 || (req.Target == "") != (req.UserID == 0) {
+	if c.ShouldBindJSON(&req) != nil || req.UserID < 0 || (req.Target == "" && req.UserID != 0) {
 		supplyError(c, model.ErrSupplyInput)
 		return
 	}
@@ -210,10 +294,18 @@ func AssignSupply(c *gin.Context) {
 		}
 		if req.Target != "" {
 			var target model.SupplyTarget
-			if err := tx.Select("id").First(&target, "id = ?", req.Target).Error; err != nil {
+			if err := tx.Select("id", "mode").First(&target, "id = ?", req.Target).Error; err != nil {
 				return err
 			}
+			if target.Mode == model.SupplyTargetDirect {
+				if req.UserID != 0 || req.Scope != "instance" {
+					return model.ErrSupplyInput
+				}
+			} else if req.UserID <= 0 || req.Scope == "instance" {
+				return model.ErrSupplyInput
+			}
 		}
+		r.DirectState = ""
 		r.Revision++
 		r.Target = req.Target
 		r.UserID = req.UserID
@@ -251,6 +343,7 @@ func WithdrawSupply(c *gin.Context) {
 			action = "archived"
 		}
 		r.Revision++
+		r.DirectState = ""
 		r.Target = ""
 		r.UserID = 0
 		r.LastError = ""
@@ -300,7 +393,7 @@ func SupplyUsage(c *gin.Context) {
 		return
 	}
 	savedDays := model.DB.Model(&model.SupplyWindow{}).Select("assignment_id").Where("day BETWEEN ? AND ?", from, to)
-	q := model.DB.Where("resource_id = ? AND started < ?", resource.ID, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
+	q := model.DB.Where("resource_id = ? AND user_id > 0 AND started < ?", resource.ID, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
 	if uid := c.Query("user_id"); uid != "" {
 		v, e := strconv.Atoi(uid)
 		if e != nil || v <= 0 {
@@ -378,7 +471,12 @@ func SupplyUsage(c *gin.Context) {
 			}
 		}
 	}
-	common.ApiSuccess(c, gin.H{"rows": rows, "complete": complete, "as_of": asOf})
+	var managed int64
+	if err := model.DB.Model(&model.SupplyAssignment{}).Where("resource_id = ? AND user_id > 0", resource.ID).Count(&managed).Error; err != nil {
+		supplyError(c, err)
+		return
+	}
+	common.ApiSuccess(c, gin.H{"rows": rows, "complete": complete, "as_of": asOf, "has_windows": managed > 0})
 }
 
 func ReceiveSupply(c *gin.Context) {
@@ -448,4 +546,78 @@ func SupplyReceiverIdentity(c *gin.Context) {
 		}
 	}
 	common.ApiSuccess(c, issuer)
+}
+
+func ExportSupplyDelivery(c *gin.Context) {
+	var input struct {
+		Target   string `json:"target"`
+		Revision int64  `json:"revision"`
+	}
+	if c.ShouldBindJSON(&input) != nil {
+		supplyError(c, model.ErrSupplyInput)
+		return
+	}
+	op := service.SupplyDeliveryContext{ResourceID: c.Param("id"), Target: input.Target, Revision: input.Revision}
+	body, err := common.Marshal(op)
+	if err != nil {
+		supplyError(c, err)
+		return
+	}
+	if middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeSupplyDelivery, Context: body}) == nil {
+		return
+	}
+	data, err := service.ExportSupplyDelivery(op, c.GetInt("id"))
+	if errors.Is(err, service.ErrDedicatedKey) {
+		common.ApiErrorT(c, service.ErrDedicatedKey.Error())
+		return
+	}
+	if err != nil {
+		supplyError(c, err)
+		return
+	}
+	common.ApiSuccess(c, data)
+}
+func ConfirmSupplyRevocation(c *gin.Context) {
+	var req struct {
+		Assignment string `json:"assignment"`
+		Revision   int64  `json:"revision"`
+		Revoked    bool   `json:"upstream_key_revoked"`
+	}
+	if c.ShouldBindJSON(&req) != nil || !req.Revoked {
+		supplyError(c, model.ErrSupplyInput)
+		return
+	}
+	if err := service.ConfirmSupplyRevocation(c.Param("id"), req.Assignment, req.Revision, c.GetInt("id"), supplyOwnerScope(c, authz.ChannelSensitiveWrite)); err != nil {
+		supplyError(c, err)
+		return
+	}
+	common.ApiSuccess(c, nil)
+}
+
+func DirectProviderUsage(c *gin.Context) {
+	r, err := supplyResourceForReader(c)
+	if err != nil {
+		supplyError(c, err)
+		return
+	}
+	var rows []model.SupplyAssignment
+	if err := model.DB.Where("resource_id = ? AND user_id = 0 AND key_ref IS NOT NULL", r.ID).Order("started,id").Find(&rows).Error; err != nil {
+		supplyError(c, err)
+		return
+	}
+	type sample struct {
+		Target  string `json:"target"`
+		Used    *int64 `json:"total_used"`
+		At      int64  `json:"as_of"`
+		Current bool   `json:"current"`
+	}
+	result := make([]sample, 0, len(rows))
+	for _, a := range rows {
+		fresh := false
+		if a.Ended == 0 && a.ID == r.ActiveID {
+			fresh = service.RefreshDirectProviderQuota(c.Request.Context(), &a) == nil
+		}
+		result = append(result, sample{a.Target, a.ProviderQuota, a.QuotaAt, fresh})
+	}
+	common.ApiSuccess(c, result)
 }

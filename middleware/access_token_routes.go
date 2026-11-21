@@ -43,13 +43,16 @@ func accessTokenScopeRule(scope string) accessTokenRouteRule {
 var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	// Supplier console reads and edits use account sessions. Machine callers use
 	// the separate receiver routes and their scoped permission.
-	"GET /api/supply/resources":               accessTokenSessionRule,
-	"POST /api/supply/resources":              accessTokenSessionRule,
-	"PUT /api/supply/resources/:id":           accessTokenSessionRule,
-	"DELETE /api/supply/resources/:id":        accessTokenSessionRule,
-	"POST /api/supply/resources/:id/withdraw": accessTokenSessionRule,
-	"GET /api/supply/resources/:id/history":   accessTokenSessionRule,
-	"GET /api/supply/resources/:id/usage":     accessTokenSessionRule,
+	"POST /api/supply/resources/:id/delivery":      accessTokenSessionRule,
+	"POST /api/supply/resources/:id/revocation":    accessTokenSessionRule,
+	"GET /api/supply/resources/:id/provider-usage": accessTokenSessionRule,
+	"GET /api/supply/resources":                    accessTokenSessionRule,
+	"POST /api/supply/resources":                   accessTokenSessionRule,
+	"PUT /api/supply/resources/:id":                accessTokenSessionRule,
+	"DELETE /api/supply/resources/:id":             accessTokenSessionRule,
+	"POST /api/supply/resources/:id/withdraw":      accessTokenSessionRule,
+	"GET /api/supply/resources/:id/history":        accessTokenSessionRule,
+	"GET /api/supply/resources/:id/usage":          accessTokenSessionRule,
 	// router/api-router.go: top level
 	"GET /api/models":                     accessTokenScopeRule("profile:read"),
 	"GET /api/status/test":                accessTokenScopeRule("log:read"),
