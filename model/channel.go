@@ -26,6 +26,10 @@ import (
 )
 
 type Channel struct {
+	// Each distribution assignment creates a new channel. NULL keeps existing
+	// shared channels routable. General channel edits cannot transfer ownership.
+	SupplyAssignmentID *string `json:"-" gorm:"size:32;<-:create"`
+	AssignedUserID     *int    `json:"assigned_user_id,omitempty" gorm:"<-:create"`
 	Id                 int     `json:"id"`
 	Type               int     `json:"type" gorm:"default:0"`
 	Key                string  `json:"key" gorm:"not null"`
@@ -548,6 +552,15 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	}
 	var deletedCount int64
 	for _, chunk := range lo.Chunk(ids, 200) {
+		var protected int64
+		if err := tx.Model(&Channel{}).Where("id IN ? AND supply_assignment_id IS NOT NULL", chunk).Count(&protected).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if protected > 0 {
+			tx.Rollback()
+			return 0, ErrSupplyConflict
+		}
 		result := tx.Where("id in (?)", chunk).Delete(&Channel{})
 		if result.Error != nil {
 			tx.Rollback()
@@ -686,7 +699,17 @@ func (channel *Channel) UpdateBalance(balance float64) {
 
 func (channel *Channel) Delete() error {
 	var err error
-	err = DB.Delete(channel).Error
+	result := DB.Where("supply_assignment_id IS NULL").Delete(channel)
+	if result.Error == nil && result.RowsAffected == 0 {
+		var managed int64
+		if err := DB.Model(&Channel{}).Where("id = ? AND supply_assignment_id IS NOT NULL", channel.Id).Count(&managed).Error; err != nil {
+			return err
+		}
+		if managed > 0 {
+			return ErrSupplyConflict
+		}
+	}
+	err = result.Error
 	if err != nil {
 		return err
 	}
@@ -1085,12 +1108,12 @@ func updateChannelUsedQuota(id int, quota int) {
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
-	result := DB.Where("status = ?", status).Delete(&Channel{})
+	result := DB.Where("status = ? AND supply_assignment_id IS NULL", status).Delete(&Channel{})
 	return result.RowsAffected, result.Error
 }
 
 func DeleteDisabledChannel() (int64, error) {
-	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
+	result := DB.Where("(status = ? OR status = ?) AND supply_assignment_id IS NULL", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
 	if result.Error == nil {
 		BumpSyncTopic(SyncTopicChannels)
 	}

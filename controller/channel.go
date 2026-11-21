@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -842,6 +843,17 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if uid := addChannelRequest.Channel.AssignedUserID; uid != nil {
+		if *uid <= 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		user, err := model.GetUserById(*uid, false)
+		if err != nil || user.Status != common.UserStatusEnabled {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+	}
 	if err := checkPluginChannelKeys(c, addChannelRequest.Channel, addChannelRequest.Channel.Key, ""); err != nil {
 		common.ApiError(c, err)
 		return
@@ -944,6 +956,9 @@ func AddChannel(c *gin.Context) {
 		"name":  addChannelRequest.Channel.Name,
 		"type":  addChannelRequest.Channel.Type,
 		"count": len(channels),
+	}
+	if addChannelRequest.Channel.AssignedUserID != nil {
+		createAudit["assigned_user_id"] = *addChannelRequest.Channel.AssignedUserID
 	}
 	if baseURLFromPluginDefault {
 		createAudit["base_url_source"] = "plugin_default"
@@ -1255,6 +1270,16 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if originChannel.SupplyAssignmentID != nil {
+		common.ApiErrorT(c, "Configuration has changed")
+		return
+	}
+	// The binding is immutable. Clients may resubmit an unchanged channel.
+	if _, present := requestData["assigned_user_id"]; present && !reflect.DeepEqual(channel.AssignedUserID, originChannel.AssignedUserID) {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	channel.AssignedUserID = originChannel.AssignedUserID
 	originProxy := originChannel.GetSetting().Proxy
 	proxyChanged := false
 	_, settingProvided := requestData["setting"]
@@ -1840,6 +1865,10 @@ func CopyChannel(c *gin.Context) {
 		return
 	}
 
+	if origin.AssignedUserID != nil {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 	// clone channel
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
 	clone.Id = 0     // let DB auto-generate

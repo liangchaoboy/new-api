@@ -143,6 +143,10 @@ func main() {
 	// 热更新配置
 	go model.SyncOptions(common.SyncFrequency)
 	go controller.SyncTaskPlugins()
+	if common.IsMasterNode {
+		go service.SyncSupplyResources()
+		go service.SyncSupplyUsage()
+	}
 
 	// 周期性重载授权策略，保证多节点/多 master 部署下权限变更能传播到每个实例
 	go authz.StartPolicySync(common.SyncFrequency)

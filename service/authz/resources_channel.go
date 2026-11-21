@@ -11,6 +11,7 @@ const (
 )
 
 var (
+	SupplyReceive         = Permission{Resource: ResourceChannel, Action: "receive_supply"}
 	ChannelRead           = Permission{Resource: ResourceChannel, Action: ActionRead}
 	ChannelOperate        = Permission{Resource: ResourceChannel, Action: ActionOperate}
 	ChannelWrite          = Permission{Resource: ResourceChannel, Action: ActionWrite}
@@ -23,6 +24,7 @@ func init() {
 		Resource: ResourceChannel,
 		LabelKey: "Channel Management",
 		Actions: []ActionDefinition{
+			{Action: "receive_supply", LabelKey: "Receive supplied channels", DescriptionKey: "Apply assigned channels and report their usage."},
 			{
 				Action:         ActionRead,
 				LabelKey:       "Read channels",

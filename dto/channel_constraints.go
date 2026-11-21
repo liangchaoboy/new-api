@@ -36,6 +36,7 @@ type ChannelPin struct {
 type ChannelFilterKind string
 
 const (
+	FilterAssignedUser       ChannelFilterKind = "assigned_user"
 	FilterRequestPath        ChannelFilterKind = "request_path"
 	FilterTaskPluginEndpoint ChannelFilterKind = "task_plugin_endpoint"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
@@ -43,6 +44,7 @@ const (
 )
 
 type ChannelFilter struct {
+	UserID                 int
 	Kind                   ChannelFilterKind
 	RequestPath            string
 	TaskPluginKey          string

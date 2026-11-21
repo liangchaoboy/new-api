@@ -3,12 +3,44 @@ package model
 import (
 	"slices"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+
+	"gorm.io/gorm"
 )
 
+// AllowsUser checks the immutable user binding on a distribution channel.
+func (ch *Channel) AllowsUser(userID int) bool {
+	return ch != nil && (ch.AssignedUserID == nil || (userID > 0 && *ch.AssignedUserID == userID))
+}
+
+// ActiveForUser reloads a bound channel before credential use. Other gateway
+// nodes may still cache the enabled status after a revocation or an old key
+// after rotation. Ordinary channels retain their existing cache behavior.
+func (ch *Channel) ActiveForUser(userID int) (*Channel, error) {
+	if !ch.AllowsUser(userID) {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if ch.AssignedUserID == nil {
+		return ch, nil
+	}
+	var active Channel
+	query := DB.Where("id = ? AND assigned_user_id = ? AND status = ?", ch.Id, userID, common.ChannelStatusEnabled)
+	if ch.SupplyAssignmentID != nil {
+		grant := DB.Model(&SupplyReceipt{}).Select("1").Where("id = ? AND channel_id = ? AND retired = ?", *ch.SupplyAssignmentID, ch.Id, false)
+		query = query.Where("EXISTS (?)", grant)
+	}
+	err := query.Take(&active).Error
+	if err != nil {
+		return nil, err
+	}
+	return &active, nil
+}
+
 var filterEvalOrder = []dto.ChannelFilterKind{
+	dto.FilterAssignedUser,
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginEndpoint,
 	dto.FilterTaskPluginIdentity,
@@ -91,6 +123,8 @@ func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind
 
 func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter) bool {
 	switch filter.Kind {
+	case dto.FilterAssignedUser:
+		return ch.AllowsUser(filter.UserID)
 	case dto.FilterRequestPath:
 		if filter.RequestPath == "" {
 			return true

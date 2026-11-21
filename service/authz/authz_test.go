@@ -153,6 +153,7 @@ func TestSetUserPermissionsStoresOnlyOverrides(t *testing.T) {
 			ActionWrite:          false,
 			ActionSensitiveWrite: true,
 			ActionSecretView:     false,
+			SupplyReceive.Action: false,
 		},
 		ResourceTaskPlugin: {
 			ActionBind: false,
@@ -185,6 +186,7 @@ func TestSetUserPermissionsStoresOnlyOverrides(t *testing.T) {
 			ActionWrite:          true,
 			ActionSensitiveWrite: false,
 			ActionSecretView:     false,
+			SupplyReceive.Action: false,
 		},
 		ResourceTaskPlugin: {
 			ActionBind: false,

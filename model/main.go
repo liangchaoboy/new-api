@@ -341,6 +341,7 @@ func migrateDB() error {
 
 	err := DB.AutoMigrate(
 		&Channel{},
+		&SupplyTarget{}, &SupplyResource{}, &SupplyAssignment{}, &SupplyReceipt{}, &SupplyWindow{}, &SupplyEvent{},
 		&Token{},
 		&User{},
 		&UserSession{},

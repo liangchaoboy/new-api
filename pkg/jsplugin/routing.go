@@ -478,6 +478,7 @@ var reservedRouteNamespaces = []string{
 	"/500",
 	"/503",
 	"/chat2link",
+	"/supply",
 	"/system-settings",
 	"/channels",
 	"/chat",

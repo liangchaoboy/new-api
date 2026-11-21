@@ -113,6 +113,11 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         title: t('Personal'),
         items: [
           {
+            title: t('Supplier channels'),
+            url: '/supply',
+            icon: Radio,
+          },
+          {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,

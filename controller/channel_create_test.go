@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -257,4 +263,132 @@ func TestAddChannelPanicRollsBackWithoutSuccess(t *testing.T) {
 	require.NoError(t, database.Model(&model.Ability{}).Count(&abilities).Error)
 	assert.Zero(t, channels)
 	assert.Zero(t, abilities)
+}
+
+func TestAssignedChannelSelectionAndRevocation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	adminID := setupChannelCreateTest(t)
+	owner := model.User{Username: "assigned-owner", AffCode: "asgnB", Status: common.UserStatusEnabled, Group: "default"}
+	peer := model.User{Username: "assigned-peer", AffCode: "asgnD", Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, model.DB.Create(&owner).Error)
+	require.NoError(t, model.DB.Create(&peer).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Unscoped().Delete(&peer).Error)
+		require.NoError(t, model.DB.Unscoped().Delete(&owner).Error)
+	})
+	const modelName = "assigned-test-model"
+	ch := model.Channel{Name: "dedicated", Type: constant.ChannelTypeOpenAI, Models: modelName, Group: "default", Key: "fixture", AssignedUserID: &owner.Id, Priority: common.GetPointer(int64(100))}
+	body, err := common.Marshal(AddChannelRequest{Mode: "single", Channel: &ch})
+	require.NoError(t, err)
+	rec := postAddChannel(t, adminID, common.RoleRootUser, string(body))
+	var result struct {
+		Success bool
+		Data    struct{ ID int }
+	}
+	require.NoError(t, common.Unmarshal(rec.Body.Bytes(), &result))
+	require.True(t, result.Success, rec.Body.String())
+	require.Positive(t, result.Data.ID)
+	shared := &model.Channel{Name: "shared", Type: ch.Type, Models: modelName, Group: "default", Key: "shared-fixture", Status: common.ChannelStatusEnabled}
+	require.NoError(t, shared.Insert())
+	t.Cleanup(func() {
+		_, err := model.BatchDeleteChannels([]int{result.Data.ID, shared.Id})
+		require.NoError(t, err)
+	})
+	for _, cached := range []bool{false, true} {
+		common.MemoryCacheEnabled = cached
+		if cached {
+			model.InitChannelCache()
+		}
+		for _, tc := range []struct {
+			name                 string
+			uid, attempt, wantID int
+			pin                  bool
+		}{
+			{"owner", owner.Id, 0, result.Data.ID, false},
+			{"peer fallback", peer.Id, 0, shared.Id, false},
+			{"peer retry", peer.Id, 1, shared.Id, false},
+			{"owner pin", owner.Id, 0, result.Data.ID, true},
+			{"peer pin", peer.Id, 0, 0, true},
+			{"missing uid pin", 0, 0, 0, true},
+		} {
+			t.Run(fmt.Sprintf("cache=%t/%s", cached, tc.name), func(t *testing.T) {
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				common.SetContextKey(c, constant.ContextKeyUserId, tc.uid)
+				if tc.pin {
+					service.GetChannelConstraints(c).AddPin(dto.ChannelPin{Source: dto.PinSourceToken, ChannelId: result.Data.ID})
+				}
+				selected, _, selectErr := service.SelectChannelForRequest(c, modelName, &service.RetryParam{Ctx: c, ModelName: modelName, TokenGroup: "default", Retry: &tc.attempt})
+				if tc.wantID == 0 {
+					require.Nil(t, selected)
+					require.NotNil(t, selectErr)
+					return
+				}
+				require.Nil(t, selectErr)
+				require.NotNil(t, selected)
+				assert.Equal(t, tc.wantID, selected.Id)
+				require.Nil(t, middleware.SetupContextForSelectedChannel(c, selected, modelName))
+			})
+		}
+	}
+	stale, err := model.CacheGetChannel(result.Data.ID)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("id = ?", stale.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyUserId, owner.Id)
+	setupErr := middleware.SetupContextForSelectedChannel(c, stale, modelName)
+	require.NotNil(t, setupErr)
+	assert.Equal(t, http.StatusForbidden, setupErr.StatusCode)
+	assert.Empty(t, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+}
+
+func TestSupplyReceiptAndUsage(t *testing.T) {
+	issuer := setupChannelCreateTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.SupplyReceipt{}))
+	id := common.GetUUID()
+	t.Cleanup(func() { require.NoError(t, model.DB.Where("id = ?", id).Delete(&model.SupplyReceipt{}).Error) })
+	cmd := model.SupplyCommand{UserID: issuer, Version: 1, Key: "mock-credential", Config: model.SupplyConfig{Name: "dedicated", Type: 1, Models: "gpt-4o"}}
+	first, err := model.ReceiveSupply(id, issuer, cmd)
+	require.NoError(t, err)
+	require.Positive(t, first.ChannelID)
+	replayed, err := model.ReceiveSupply(id, issuer, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, first.ChannelID, replayed.ChannelID)
+	conflict := cmd
+	conflict.Key = "conflicting"
+	_, err = model.ReceiveSupply(id, issuer, conflict)
+	require.ErrorIs(t, err, model.ErrSupplyConflict)
+	_, err = model.ReceiveSupply(id, issuer+1, cmd)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	cmd.Version = 2
+	cmd.Key = "rotated"
+	updated, err := model.ReceiveSupply(id, issuer, cmd)
+	require.NoError(t, err)
+	assert.Equal(t, first.ChannelID, updated.ChannelID)
+	day := common.GetTimestamp() / 86400 * 86400
+	log := model.Log{UserId: issuer, ChannelId: first.ChannelID, Type: model.LogTypeConsume, ModelName: "gpt-4o", CreatedAt: day + 1, PromptTokens: 12, CompletionTokens: 4}
+	require.NoError(t, model.LOG_DB.Create(&log).Error)
+	t.Cleanup(func() { require.NoError(t, model.LOG_DB.Delete(&log).Error) })
+	cmd.Version = 3
+	cmd.Retire = true
+	receipt, err := model.ReceiveSupply(id, issuer, cmd)
+	require.NoError(t, err)
+	require.True(t, receipt.Retired)
+	bound, err := model.GetChannelById(first.ChannelID, true)
+	require.NoError(t, err)
+	assert.Empty(t, bound.Key)
+	require.NoError(t, model.DB.Model(bound).Update("status", common.ChannelStatusEnabled).Error)
+	_, err = bound.ActiveForUser(issuer)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	_, err = model.BatchDeleteChannels([]int{first.ChannelID})
+	require.ErrorIs(t, err, model.ErrSupplyConflict)
+	t.Cleanup(func() { require.NoError(t, model.DB.Where("id = ?", first.ChannelID).Delete(&model.Channel{}).Error) })
+	cmd.Version = 4
+	cmd.Retire = false
+	_, err = model.ReceiveSupply(id, issuer, cmd)
+	require.ErrorIs(t, err, model.ErrSupplyConflict)
+	rows, err := model.SupplyDayUsage(receipt, day)
+	require.NoError(t, err)
+	assert.Equal(t, []model.SupplyConsumption{{ModelName: "gpt-4o", Records: 1, InputTokens: 12, OutputTokens: 4}}, rows)
 }
