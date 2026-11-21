@@ -21,6 +21,8 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
 
+import { useAuthStore } from '@/stores/auth-store'
+
 import { supplyRequest } from '../api'
 import { ResourceEditor } from '../editor'
 
@@ -79,4 +81,49 @@ it('opens the creation form from the supplier channel list', async () => {
   expect(
     await screen.findByRole('dialog', { name: 'Add channel' })
   ).toBeInTheDocument()
+})
+
+it('shows reports and hides channel changes for a read-only admin viewing another supplier', async () => {
+  const { SupplyPage } = await import('../index')
+  useAuthStore
+    .getState()
+    .auth.setUser({
+      id: 8,
+      username: 'reader',
+      role: 10,
+      permissions: { admin_permissions: { channel: { read: true } } },
+    })
+  try {
+    vi.mocked(supplyRequest).mockImplementation(async (path) =>
+      path === 'targets'
+        ? []
+        : [
+            {
+              id: 'c',
+              name: 'Supplier C',
+              supplier_id: 9,
+              revision: 1,
+              applied: 1,
+            },
+          ]
+    )
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <SupplyPage />
+      </QueryClientProvider>
+    )
+    expect(await screen.findByText('Supplier C')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Usage' })).toBeInTheDocument()
+    for (const name of [
+      'Edit',
+      'Assign channel',
+      'Withdraw',
+      'Delete',
+      'Downstream instances',
+    ]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    }
+  } finally {
+    useAuthStore.getState().auth.setUser(null)
+  }
 })

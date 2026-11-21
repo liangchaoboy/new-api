@@ -146,6 +146,7 @@ func main() {
 	if common.IsMasterNode {
 		go service.SyncSupplyResources()
 		go service.SyncSupplyUsage()
+		go service.SyncRetiredSupplyUsage()
 	}
 
 	// 周期性重载授权策略，保证多节点/多 master 部署下权限变更能传播到每个实例

@@ -5,7 +5,9 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relay/requestplugin"
@@ -45,9 +47,19 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 		defer clientWriteMu.Unlock()
 		return helper.WssString(c, clientConn, string(message))
 	}
+	bound, _ := common.GetContextKeyType[*model.Channel](c, constant.ContextKeyBoundChannel)
+	group := info.UsingGroup
+	if group == "auto" {
+		group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	}
 	writeTarget := func(message []byte) error {
 		targetWriteMu.Lock()
 		defer targetWriteMu.Unlock()
+		if bound != nil {
+			if err := bound.CheckRealtimeBinding(info.UserId, group, info.OriginModelName); err != nil {
+				return fmt.Errorf("channel authorization changed; reconnect required")
+			}
+		}
 		return helper.WssString(c, targetConn, string(message))
 	}
 	plugins := requestplugin.NewRealtime(c, info, func(message []byte) {
@@ -124,16 +136,15 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					return
 				}
 				logger.LogInfo(c, common.LogText("type: %s, textToken: %d, audioToken: %d", realtimeEvent.Type, textToken, audioToken))
-				localUsage.TotalTokens += textToken + audioToken
-				localUsage.InputTokens += textToken + audioToken
-				localUsage.InputTokenDetails.TextTokens += textToken
-				localUsage.InputTokenDetails.AudioTokens += audioToken
-
 				err = writeTarget(message)
 				if err != nil {
 					errChan <- fmt.Errorf("error writing to target: %v", err)
 					return
 				}
+				localUsage.TotalTokens += textToken + audioToken
+				localUsage.InputTokens += textToken + audioToken
+				localUsage.InputTokenDetails.TextTokens += textToken
+				localUsage.InputTokenDetails.AudioTokens += audioToken
 
 				select {
 				case sendChan <- message:

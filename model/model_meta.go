@@ -444,7 +444,7 @@ func normalizeLookupValues(values []string) []string {
 	return normalized
 }
 
-func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (map[string]int, error) {
+func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string, userID int) (map[string]int, error) {
 	result := make(map[string]int)
 	modelNames = normalizeLookupValues(modelNames)
 	if len(modelNames) == 0 {
@@ -461,6 +461,7 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 		Select("abilities.model as model, channels.type as channel_type").
 		Joins("JOIN channels ON abilities.channel_id = channels.id").
 		Where("abilities.model IN ? AND abilities.enabled = ? AND channels.status = ?", modelNames, true, common.ChannelStatusEnabled).
+		Where("channels.assigned_user_id IS NULL OR channels.assigned_user_id = ?", userID).
 		Order("COALESCE(abilities.priority, 0) DESC").
 		Order("abilities.weight DESC").
 		Order("abilities.channel_id ASC")

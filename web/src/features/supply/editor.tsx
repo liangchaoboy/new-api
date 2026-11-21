@@ -39,6 +39,7 @@ const schema = z.object({
   key: z.string().max(48000),
 })
 export function ResourceEditor(props: {
+  restrictSensitive?: boolean
   resource?: SupplyResource
   close: () => void
   saved: () => void
@@ -86,7 +87,10 @@ export function ResourceEditor(props: {
         </Label>
         <Label>
           {t('Type')}
-          <NativeSelect {...form.register('type')}>
+          <NativeSelect
+            disabled={props.restrictSensitive}
+            {...form.register('type')}
+          >
             {[
               [1, 'OpenAI'],
               [14, 'Anthropic'],
@@ -103,7 +107,11 @@ export function ResourceEditor(props: {
         </Label>
         <Label>
           {t('Base URL')}
-          <Input type='url' {...form.register('base_url')} />
+          <Input
+            readOnly={props.restrictSensitive}
+            type='url'
+            {...form.register('base_url')}
+          />
         </Label>
         <Label>
           {t('Models')}
@@ -117,6 +125,7 @@ export function ResourceEditor(props: {
           {t('API Key')}
           <PasswordInput
             autoComplete='new-password'
+            readOnly={props.restrictSensitive}
             required={!r}
             {...form.register('key')}
           />

@@ -24,6 +24,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { StaticDataTable } from '@/components/data-table'
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
+import { hasPermission } from '@/lib/admin-permissions'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -48,6 +49,10 @@ export function SupplyPage() {
   const { t } = useTranslation()
   const user = useAuthStore((s) => s.auth.user)
   const admin = (user?.role ?? 0) >= ROLE.ADMIN
+  const canRead = admin && hasPermission(user, 'channel', 'read')
+  const canWrite = admin && hasPermission(user, 'channel', 'write')
+  const canOperate = admin && hasPermission(user, 'channel', 'operate')
+  const sensitive = admin && hasPermission(user, 'channel', 'sensitive_write')
   const qc = useQueryClient()
   const [view, setView] = useState<View>()
   const resources = useQuery({
@@ -58,7 +63,7 @@ export function SupplyPage() {
   const targets = useQuery({
     queryKey: ['supply', 'targets', user?.id],
     queryFn: () => supplyRequest<SupplyTarget[]>('targets'),
-    enabled: admin,
+    enabled: canRead,
   })
   const close = () => setView(undefined)
   const saved = () => {
@@ -89,7 +94,7 @@ export function SupplyPage() {
           {t('Supplier channels')}
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
-          {admin && (
+          {sensitive && canRead && (
             <Button
               variant='outline'
               onClick={() => setView({ kind: 'targets' })}
@@ -155,7 +160,7 @@ export function SupplyPage() {
                 header: t('Actions'),
                 cell: (x) => (
                   <div className='flex flex-wrap gap-1'>
-                    {admin && x.last_error && (
+                    {canWrite && x.last_error && (
                       <Button
                         size='sm'
                         variant='outline'
@@ -167,14 +172,18 @@ export function SupplyPage() {
                     )}
                     {!x.archived && (
                       <>
-                        <Button
-                          size='sm'
-                          variant='outline'
-                          onClick={() => setView({ kind: 'edit', resource: x })}
-                        >
-                          {t('Edit')}
-                        </Button>
-                        {admin && (
+                        {(x.supplier_id === user?.id || canWrite) && (
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            onClick={() =>
+                              setView({ kind: 'edit', resource: x })
+                            }
+                          >
+                            {t('Edit')}
+                          </Button>
+                        )}
+                        {canWrite && canRead && (
                           <Button
                             size='sm'
                             variant='outline'
@@ -185,26 +194,29 @@ export function SupplyPage() {
                             {t('Assign channel')}
                           </Button>
                         )}
-                        {x.target && (
+                        {(x.supplier_id === user?.id || canOperate) &&
+                          x.target && (
+                            <Button
+                              size='sm'
+                              variant='outline'
+                              onClick={() =>
+                                setView({ kind: 'withdraw', resource: x })
+                              }
+                            >
+                              {t('Withdraw')}
+                            </Button>
+                          )}
+                        {(x.supplier_id === user?.id || sensitive) && (
                           <Button
                             size='sm'
                             variant='outline'
                             onClick={() =>
-                              setView({ kind: 'withdraw', resource: x })
+                              setView({ kind: 'archive', resource: x })
                             }
                           >
-                            {t('Withdraw')}
+                            {t('Delete')}
                           </Button>
                         )}
-                        <Button
-                          size='sm'
-                          variant='outline'
-                          onClick={() =>
-                            setView({ kind: 'archive', resource: x })
-                          }
-                        >
-                          {t('Delete')}
-                        </Button>
                       </>
                     )}
                     <Button
@@ -229,7 +241,12 @@ export function SupplyPage() {
         </SectionPageLayout.Content>
       </SectionPageLayout>
       {(view?.kind === 'create' || view?.kind === 'edit') && (
-        <ResourceEditor resource={r} close={close} saved={saved} />
+        <ResourceEditor
+          restrictSensitive={!!r && r.supplier_id !== user?.id && !sensitive}
+          resource={r}
+          close={close}
+          saved={saved}
+        />
       )}
       {view?.kind === 'targets' && (
         <TargetEditor

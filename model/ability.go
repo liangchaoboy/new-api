@@ -40,10 +40,10 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	return abilities, err
 }
 
-func GetGroupEnabledModels(group string) []string {
+func GetGroupEnabledModels(group string, userID int) []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	DB.Table("abilities").Joins("JOIN channels ON channels.id = abilities.channel_id").Where("abilities."+commonGroupCol+" = ? AND abilities.enabled = ? AND channels.status = ?", group, true, common.ChannelStatusEnabled).Where("channels.assigned_user_id IS NULL OR channels.assigned_user_id = ?", userID).Distinct("abilities.model").Pluck("model", &models)
 	return models
 }
 

@@ -128,7 +128,7 @@ func TestGetPreferredModelOwnerChannelTypes(t *testing.T) {
 			clearPreferredOwnerTables(t)
 			tt.setup(t)
 
-			owners, err := GetPreferredModelOwnerChannelTypes([]string{modelName}, tt.groups)
+			owners, err := GetPreferredModelOwnerChannelTypes([]string{modelName}, tt.groups, 0)
 			require.NoError(t, err)
 
 			got, ok := owners[modelName]

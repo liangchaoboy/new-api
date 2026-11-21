@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"gorm.io/gorm"
 )
@@ -26,17 +27,58 @@ func (ch *Channel) ActiveForUser(userID int) (*Channel, error) {
 	if ch.AssignedUserID == nil {
 		return ch, nil
 	}
+	return ch.loadBoundChannel(false)
+}
+
+// ForHealthProbe is used only by the authorized channel test and recovery
+// workers. The probe keeps its operator identity for accounting and may test a
+// disabled channel, but never a retired supply assignment.
+func (ch *Channel) ForHealthProbe() (*Channel, error) {
+	if ch.AssignedUserID == nil {
+		return ch, nil
+	}
+	return ch.loadBoundChannel(true)
+}
+
+func (ch *Channel) loadBoundChannel(probe bool) (*Channel, error) {
 	var active Channel
-	query := DB.Where("id = ? AND assigned_user_id = ? AND status = ?", ch.Id, userID, common.ChannelStatusEnabled)
+	query := DB.Where("id = ? AND assigned_user_id = ?", ch.Id, *ch.AssignedUserID)
+	if !probe {
+		query = query.Where("status = ?", common.ChannelStatusEnabled)
+	}
 	if ch.SupplyAssignmentID != nil {
 		grant := DB.Model(&SupplyReceipt{}).Select("1").Where("id = ? AND channel_id = ? AND retired = ?", *ch.SupplyAssignmentID, ch.Id, false)
-		query = query.Where("EXISTS (?)", grant)
+		query = query.Where("supply_assignment_id = ? AND EXISTS (?)", *ch.SupplyAssignmentID, grant)
 	}
-	err := query.Take(&active).Error
-	if err != nil {
+	if err := query.Take(&active).Error; err != nil {
 		return nil, err
 	}
 	return &active, nil
+}
+
+// ServesSupplyRoute checks the latest configuration after candidate selection.
+func (ch *Channel) ServesSupplyRoute(group, name string) bool {
+	if ch.SupplyAssignmentID == nil {
+		return true
+	}
+	if !slices.Contains(ch.GetGroups(), group) {
+		return false
+	}
+	models := ch.GetModels()
+	return slices.Contains(models, name) || slices.Contains(models, ratio_setting.RoutingMatchModelName(name))
+}
+
+// CheckRealtimeBinding authorizes a new upstream write on an existing
+// connection using its original identity and physical upstream credentials.
+func (ch *Channel) CheckRealtimeBinding(userID int, group, modelName string) error {
+	active, err := ch.ActiveForUser(userID)
+	if err != nil {
+		return err
+	}
+	if !active.ServesSupplyRoute(group, modelName) || active.Type != ch.Type || active.GetBaseURL() != ch.GetBaseURL() || active.Key != ch.Key {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 var filterEvalOrder = []dto.ChannelFilterKind{

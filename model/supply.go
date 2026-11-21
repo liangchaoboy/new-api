@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 // SupplyConfig contains only fields a supplier may propose for distribution.
@@ -83,6 +84,7 @@ type SupplyWindow struct {
 	Day          int64  `gorm:"primaryKey;autoIncrement:false"`
 	Content      string `gorm:"type:text"`
 	Collected    int64
+	Incomplete   bool
 }
 
 var ErrSupplyConflict = errors.New("Configuration has changed")
@@ -121,7 +123,7 @@ func ReceiveSupply(id string, issuer int, cmd SupplyCommand) (SupplyReceipt, err
 	sum := sha256.Sum256(payload)
 	digest := hex.EncodeToString(sum[:])
 	changed := false
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err = DB.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
 		row := SupplyReceipt{ID: id, Issuer: issuer, UserID: cmd.UserID}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 			return err
@@ -171,8 +173,8 @@ func ReceiveSupply(id string, issuer int, cmd SupplyCommand) (SupplyReceipt, err
 				if err := lockForUpdate(tx).First(&existing, "id = ? AND assigned_user_id = ?", channel.Id, cmd.UserID).Error; err != nil {
 					return err
 				}
-				channel.Weight, channel.Priority = existing.Weight, existing.Priority
-				if err := tx.Model(&existing).Select("name", "type", "base_url", "group", "models", "key", "status").Updates(&channel).Error; err != nil {
+				channel.Weight, channel.Priority, channel.Status = existing.Weight, existing.Priority, existing.Status
+				if err := tx.Model(&existing).Select("name", "type", "base_url", "group", "models", "key").Updates(&channel).Error; err != nil {
 					return err
 				}
 				if err := channel.UpdateAbilities(tx); err != nil {
@@ -206,6 +208,17 @@ func SupplyDayUsage(receipt SupplyReceipt, day int64) ([]SupplyConsumption, erro
 	return rows, err
 }
 
+// NextSupplyUsageDay locates late settlements without requesting every empty
+// day after a channel's retirement. The remote channel ID is never reused.
+func NextSupplyUsageDay(r SupplyReceipt, from int64) (int64, error) {
+	if !common.LogConsumeEnabled {
+		return 0, errors.New("Consumption logging is disabled")
+	}
+	var at int64
+	err := LOG_DB.Model(&Log{}).Select("COALESCE(MIN(created_at),0)").Where("channel_id = ? AND user_id = ? AND type = ? AND created_at >= ?", r.ChannelID, r.UserID, LogTypeConsume, from).Scan(&at).Error
+	return at / 86400 * 86400, err
+}
+
 func (cfg SupplyConfig) Valid() bool {
 	if strings.TrimSpace(cfg.Name) == "" || len(cfg.Name) > 128 || len(cfg.BaseURL) > 512 || cfg.Models == "" || len(cfg.Models) > 8192 {
 		return false
@@ -219,6 +232,7 @@ func (cfg SupplyConfig) Valid() bool {
 }
 
 type SupplyTarget struct {
+	Issuer int    `json:"-"`
 	ID     string `json:"id" gorm:"primaryKey;size:32"`
 	Name   string `json:"name" gorm:"size:128"`
 	URL    string `json:"url" gorm:"size:512"`
@@ -239,6 +253,29 @@ func StoreSupplyWindow(w *SupplyWindow) error {
 		}
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		}
+		if err == nil {
+			// Consume rows only accumulate. Source cleanup, partial imports and
+			// out-of-order replies must not erase a previously observed total.
+			var previous, current []SupplyConsumption
+			if err := common.UnmarshalJsonStr(old.Content, &previous); err != nil {
+				return err
+			}
+			if err := common.UnmarshalJsonStr(w.Content, &current); err != nil {
+				return err
+			}
+			byModel := make(map[string]SupplyConsumption, len(current))
+			for _, r := range current {
+				byModel[r.ModelName] = r
+			}
+			for _, r := range previous {
+				n := byModel[r.ModelName]
+				if n.Records < r.Records || n.InputTokens < r.InputTokens || n.OutputTokens < r.OutputTokens {
+					*w = old
+					w.Incomplete = true
+					return tx.Model(w).Update("incomplete", true).Error
+				}
+			}
 		}
 		return tx.Save(w).Error
 	})

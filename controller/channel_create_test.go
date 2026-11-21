@@ -1,13 +1,16 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -15,11 +18,16 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	gormlog "gorm.io/gorm/logger"
 )
 
 func setupChannelCreateTest(t *testing.T) int {
@@ -344,11 +352,16 @@ func TestAssignedChannelSelectionAndRevocation(t *testing.T) {
 }
 
 func TestSupplyReceiptAndUsage(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	issuer := setupChannelCreateTest(t)
 	require.NoError(t, model.DB.AutoMigrate(&model.SupplyReceipt{}))
 	id := common.GetUUID()
 	t.Cleanup(func() { require.NoError(t, model.DB.Where("id = ?", id).Delete(&model.SupplyReceipt{}).Error) })
 	cmd := model.SupplyCommand{UserID: issuer, Version: 1, Key: "mock-credential", Config: model.SupplyConfig{Name: "dedicated", Type: 1, Models: "gpt-4o"}}
+	var debugSQL bytes.Buffer
+	db := model.DB
+	model.DB = db.Session(&gorm.Session{Logger: gormlog.New(log.New(&debugSQL, "", 0), gormlog.Config{LogLevel: gormlog.Info})})
+	t.Cleanup(func() { model.DB = db })
 	first, err := model.ReceiveSupply(id, issuer, cmd)
 	require.NoError(t, err)
 	require.Positive(t, first.ChannelID)
@@ -361,16 +374,53 @@ func TestSupplyReceiptAndUsage(t *testing.T) {
 	require.ErrorIs(t, err, model.ErrSupplyConflict)
 	_, err = model.ReceiveSupply(id, issuer+1, cmd)
 	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", first.ChannelID).Update("status", common.ChannelStatusAutoDisabled).Error)
 	cmd.Version = 2
 	cmd.Key = "rotated"
 	updated, err := model.ReceiveSupply(id, issuer, cmd)
 	require.NoError(t, err)
 	assert.Equal(t, first.ChannelID, updated.ChannelID)
+	assert.NotContains(t, debugSQL.String(), "mock-credential")
+	assert.NotContains(t, debugSQL.String(), "rotated")
+	ch, err := model.GetChannelById(first.ChannelID, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, ch.Status)
+	_, err = ch.ActiveForUser(issuer)
+	require.Error(t, err)
+	probe, err := ch.ForHealthProbe()
+	require.NoError(t, err)
+	assert.Equal(t, cmd.Key, probe.Key)
+	probeCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	probeCtx.Request = httptest.NewRequest("POST", "/", nil)
+	probeCtx.Set("id", issuer+1)
+	require.Nil(t, middleware.SetupContextForChannelProbe(probeCtx, ch, "gpt-4o"))
+	assert.Equal(t, issuer+1, probeCtx.GetInt("id"))
+	assert.Equal(t, cmd.Key, common.GetContextKeyString(probeCtx, constant.ContextKeyChannelKey))
+	require.NoError(t, db.Model(ch).Update("status", common.ChannelStatusEnabled).Error)
+	savedRoute, err := ch.ActiveForUser(issuer)
+	require.NoError(t, err)
+	require.True(t, savedRoute.ServesSupplyRoute("default", "gpt-4o"))
+	require.NoError(t, savedRoute.CheckRealtimeBinding(issuer, "default", "gpt-4o"))
+	cmd.Version++
+	cmd.Config.Models = "replacement-model"
+	_, err = model.ReceiveSupply(id, issuer, cmd)
+	require.NoError(t, err)
+	current, err := savedRoute.ActiveForUser(issuer)
+	require.NoError(t, err)
+	assert.False(t, current.ServesSupplyRoute("default", "gpt-4o"))
+	assert.False(t, current.ServesSupplyRoute("other", "replacement-model"))
+	require.Error(t, savedRoute.CheckRealtimeBinding(issuer, "default", "gpt-4o"))
+	staleCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	staleCtx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	staleCtx.Set("id", issuer)
+	staleCtx.Set("group", "default")
+	require.NotNil(t, middleware.SetupContextForSelectedChannel(staleCtx, savedRoute, "gpt-4o"))
+	assert.Empty(t, common.GetContextKeyString(staleCtx, constant.ContextKeyChannelKey))
 	day := common.GetTimestamp() / 86400 * 86400
 	log := model.Log{UserId: issuer, ChannelId: first.ChannelID, Type: model.LogTypeConsume, ModelName: "gpt-4o", CreatedAt: day + 1, PromptTokens: 12, CompletionTokens: 4}
 	require.NoError(t, model.LOG_DB.Create(&log).Error)
 	t.Cleanup(func() { require.NoError(t, model.LOG_DB.Delete(&log).Error) })
-	cmd.Version = 3
+	cmd.Version++
 	cmd.Retire = true
 	receipt, err := model.ReceiveSupply(id, issuer, cmd)
 	require.NoError(t, err)
@@ -378,17 +428,253 @@ func TestSupplyReceiptAndUsage(t *testing.T) {
 	bound, err := model.GetChannelById(first.ChannelID, true)
 	require.NoError(t, err)
 	assert.Empty(t, bound.Key)
+	require.Error(t, current.CheckRealtimeBinding(issuer, "default", "replacement-model"))
+	_, err = bound.ForHealthProbe()
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
 	require.NoError(t, model.DB.Model(bound).Update("status", common.ChannelStatusEnabled).Error)
 	_, err = bound.ActiveForUser(issuer)
 	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
 	_, err = model.BatchDeleteChannels([]int{first.ChannelID})
 	require.ErrorIs(t, err, model.ErrSupplyConflict)
 	t.Cleanup(func() { require.NoError(t, model.DB.Where("id = ?", first.ChannelID).Delete(&model.Channel{}).Error) })
-	cmd.Version = 4
+	cmd.Version++
 	cmd.Retire = false
 	_, err = model.ReceiveSupply(id, issuer, cmd)
 	require.ErrorIs(t, err, model.ErrSupplyConflict)
+	next, err := model.NextSupplyUsageDay(receipt, day)
+	require.NoError(t, err)
+	assert.Equal(t, day, next)
 	rows, err := model.SupplyDayUsage(receipt, day)
 	require.NoError(t, err)
 	assert.Equal(t, []model.SupplyConsumption{{ModelName: "gpt-4o", Records: 1, InputTokens: 12, OutputTokens: 4}}, rows)
+}
+
+func TestSupplyReviewSafety(t *testing.T) {
+	owner := setupChannelCreateTest(t)
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.SupplyResource{}, &model.SupplyTarget{}, &model.SupplyAssignment{}, &model.SupplyWindow{}, &model.SupplyEvent{}))
+	t.Setenv("CRYPTO_SECRET", "fixture-only")
+	t.Run("only a valid single channel can be removed", func(t *testing.T) {
+		ch := model.Channel{Name: "delete-guard", Key: "fixture", Group: "default", Models: "guard"}
+		require.NoError(t, ch.Insert())
+		for _, id := range []string{"0", "invalid", "-1"} {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Params = gin.Params{{Key: "id", Value: id}}
+			DeleteChannel(c)
+			assert.Contains(t, rec.Body.String(), `"success":false`)
+		}
+		require.Error(t, (&model.Channel{}).Delete())
+		_, err := model.GetChannelById(ch.Id, false)
+		require.NoError(t, err)
+		require.NoError(t, ch.Delete())
+	})
+	t.Run("visibility and shared polling cursor", func(t *testing.T) {
+		ch := model.Channel{Name: "bound-keys", Key: "one\ntwo", Group: "default", Models: "private-fixture", AssignedUserID: &owner, Status: common.ChannelStatusEnabled, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}}
+		require.NoError(t, ch.Insert())
+		t.Cleanup(func() { require.NoError(t, ch.Delete()) })
+		assert.Contains(t, model.GetGroupEnabledModels("default", owner), "private-fixture")
+		assert.NotContains(t, model.GetGroupEnabledModels("default", owner+1), "private-fixture")
+		common.MemoryCacheEnabled = true
+		defer func() { common.MemoryCacheEnabled = false }()
+		model.InitChannelCache()
+		for _, expected := range []string{"one", "two", "one"} {
+			current, err := ch.ActiveForUser(owner)
+			require.NoError(t, err)
+			key, _, apiErr := current.GetNextEnabledKey()
+			require.Nil(t, apiErr)
+			assert.Equal(t, expected, key)
+		}
+	})
+	t.Run("credential preflight and historic window preservation", func(t *testing.T) {
+		identity := owner
+		valid := true
+		calls := 0
+		peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/identity") {
+				if !valid {
+					w.WriteHeader(403)
+					return
+				}
+				fmt.Fprintf(w, `{"success":true,"data":%d}`, identity)
+				return
+			}
+			calls++
+			fmt.Fprint(w, `{"success":true,"data":[]}`)
+		}))
+		defer peer.Close()
+		target := model.SupplyTarget{ID: common.GetUUID(), Name: "fixture", URL: peer.URL, Issuer: owner}
+		key, err := service.SealSupplySecret("target/"+target.ID, "fixture")
+		require.NoError(t, err)
+		target.Secret = key
+		require.NoError(t, db.Create(&target).Error)
+		t.Cleanup(func() { require.NoError(t, db.Delete(&target).Error) })
+		rotate := func() bool {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Params = gin.Params{{Key: "id", Value: target.ID}}
+			c.Request = httptest.NewRequest("PUT", "/", strings.NewReader(`{"token":"replacement"}`))
+			SaveSupplyTarget(c)
+			return strings.Contains(rec.Body.String(), `"success":true`)
+		}
+		identity++
+		assert.False(t, rotate())
+		valid = false
+		assert.False(t, rotate())
+		var saved model.SupplyTarget
+		require.NoError(t, db.First(&saved, "id = ?", target.ID).Error)
+		assert.Equal(t, key, saved.Secret)
+		identity = owner
+		valid = true
+		assert.True(t, rotate())
+		r := model.SupplyResource{ID: common.GetUUID(), SupplierID: owner, Revision: 1}
+		require.NoError(t, db.Create(&r).Error)
+		t.Cleanup(func() { require.NoError(t, db.Delete(&r).Error) })
+		day := (common.GetTimestamp()/86400 - 40) * 86400
+		a := model.SupplyAssignment{ID: common.GetUUID(), ResourceID: r.ID, Target: target.ID, UserID: owner, ChannelID: 123, Started: day, Ended: day + 3600}
+		require.NoError(t, db.Create(&a).Error)
+		t.Cleanup(func() { require.NoError(t, db.Delete(&a).Error) })
+		w := model.SupplyWindow{AssignmentID: a.ID, Day: day, Collected: day + 3600, Content: `[{"model":"sample","records":10,"input_tokens":12}]`}
+		require.NoError(t, db.Create(&w).Error)
+		t.Cleanup(func() { require.NoError(t, db.Delete(&w).Error) })
+		observed, err := service.CollectSupplyWindow(t.Context(), a, day)
+		require.NoError(t, err)
+		assert.True(t, observed.Incomplete)
+		assert.Equal(t, w.Content, observed.Content)
+		var stored model.SupplyWindow
+		require.NoError(t, db.First(&stored, "assignment_id = ? AND day = ?", a.ID, day).Error)
+		assert.Equal(t, w.Collected, stored.Collected)
+		assert.True(t, stored.Incomplete)
+		for _, filterDay := range []int64{day, common.GetTimestamp() / 86400 * 86400} {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Set("id", owner)
+			c.Set("role", common.RoleCommonUser)
+			c.Params = gin.Params{{Key: "id", Value: r.ID}}
+			c.Request = httptest.NewRequest("GET", fmt.Sprintf("/?from=%d&to=%d", filterDay, filterDay), nil)
+			SupplyUsage(c)
+			assert.Contains(t, rec.Body.String(), `"success":true`)
+			if filterDay == day {
+				assert.Contains(t, rec.Body.String(), `"records":10`)
+				assert.Contains(t, rec.Body.String(), `"complete":false`)
+			}
+		}
+		assert.Equal(t, 1, calls)
+		// A long-running request may settle after the ordinary grace period.
+		// The history page must include a known late window without contacting the retired target.
+		late := model.SupplyWindow{AssignmentID: a.ID, Day: day + 5*86400, Collected: day + 8*86400, Content: `[{"model":"late","records":2}]`}
+		require.NoError(t, db.Create(&late).Error)
+		t.Cleanup(func() { require.NoError(t, db.Delete(&late).Error) })
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Set("id", owner)
+		c.Params = gin.Params{{Key: "id", Value: r.ID}}
+		c.Request = httptest.NewRequest("GET", fmt.Sprintf("/?from=%d&to=%d", late.Day, late.Day), nil)
+		SupplyUsage(c)
+		assert.Contains(t, rec.Body.String(), `"records":2`)
+		assert.Contains(t, rec.Body.String(), `"complete":true`)
+		assert.Equal(t, 1, calls)
+	})
+}
+
+func TestSupplyRestrictedAdminCannotChangeOtherSupplier(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.SupplyResource{}, &model.SupplyEvent{}))
+	cfg := model.SupplyConfig{Name: "original", Models: "model", Type: 1}
+	r := model.SupplyResource{ID: common.GetUUID(), SupplierID: 91, Revision: 1, SupplyConfig: cfg}
+	require.NoError(t, model.DB.Create(&r).Error)
+	const admin = 92
+	require.NoError(t, authz.SetUserPermissions(admin, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionRead: true, authz.ActionWrite: false, authz.ActionOperate: false, authz.ActionSensitiveWrite: false}}))
+	for _, tc := range []struct {
+		method  string
+		handler gin.HandlerFunc
+	}{{"PUT", SaveSupplyResource}, {"POST", WithdrawSupply}, {"DELETE", WithdrawSupply}} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Set("id", admin)
+		c.Set("role", common.RoleAdminUser)
+		c.Params = gin.Params{{Key: "id", Value: r.ID}}
+		c.Request = httptest.NewRequest(tc.method, "/?revision=1", strings.NewReader(`{"name":"changed","type":1,"models":"model","revision":1}`))
+		tc.handler(c)
+		assert.Contains(t, rec.Body.String(), `"success":false`)
+	}
+	require.NoError(t, authz.SetUserPermissions(admin, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionRead: true, authz.ActionWrite: true, authz.ActionSensitiveWrite: false}}))
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set("id", admin)
+	c.Set("role", common.RoleAdminUser)
+	c.Params = gin.Params{{Key: "id", Value: r.ID}}
+	c.Request = httptest.NewRequest("PUT", "/", strings.NewReader(`{"name":"changed","type":1,"models":"model","base_url":"https://example.org","revision":1}`))
+	SaveSupplyResource(c)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var saved model.SupplyResource
+	require.NoError(t, model.DB.First(&saved, "id = ?", r.ID).Error)
+	assert.Equal(t, int64(1), saved.Revision)
+	assert.False(t, saved.Archived)
+}
+
+func supplyTestSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
+	t.Helper()
+	accepted := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket handshake: %v", err)
+			return
+		}
+		accepted <- conn
+	}))
+	t.Cleanup(server.Close)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	peer := <-accepted
+	t.Cleanup(func() { client.Close(); peer.Close() })
+	return client, peer
+}
+
+func TestSupplyRealtimeRevocation(t *testing.T) {
+	uid := setupChannelCreateTest(t)
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.SupplyReceipt{}))
+	id := common.GetUUID()
+	cmd := model.SupplyCommand{UserID: uid, Version: 1, Key: "fixture", Config: model.SupplyConfig{Name: "realtime", Models: "rt-model", Type: constant.ChannelTypeOpenAI}}
+	receipt, err := model.ReceiveSupply(id, uid, cmd)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Where("id = ?", id).Delete(&model.SupplyReceipt{}).Error)
+		require.NoError(t, db.Where("id = ?", receipt.ChannelID).Delete(&model.Channel{}).Error)
+	})
+	ch, err := model.GetChannelById(receipt.ChannelID, true)
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set("id", uid)
+	c.Set("group", "default")
+	c.Request = httptest.NewRequest("GET", "/v1/realtime", nil)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, ch, "rt-model"))
+	client, downstream := supplyTestSocketPair(t)
+	upstream, source := supplyTestSocketPair(t)
+	info := &relaycommon.RelayInfo{UserId: uid, UsingGroup: "default", OriginModelName: "rt-model", ClientWs: downstream, TargetWs: upstream, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "rt-model"}}
+	done := make(chan struct{})
+	go func() { defer close(done); defer upstream.Close(); openai.OpenaiRealtimeHandler(c, info) }()
+	event := []byte(`{"type":"response.create"}`)
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, event))
+	require.NoError(t, source.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, data, err := source.ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, event, data)
+	// Commit a target-side revocation while the relay on another node still
+	// holds its original connection and has received no close notification.
+	cmd.Version++
+	cmd.Retire = true
+	_, err = model.ReceiveSupply(id, uid, cmd)
+	require.NoError(t, err)
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, event))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked session continued accepting events")
+	}
+	_, _, err = source.ReadMessage()
+	require.Error(t, err)
 }

@@ -15,7 +15,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -271,22 +270,25 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	case constant.MultiKeyModePolling:
 		// Use channel-specific lock to ensure thread-safe polling
 
-		channelInfo, err := CacheGetChannelInfo(channel.Id)
-		if err != nil {
-			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		cursor := &channel.ChannelInfo
+		if common.MemoryCacheEnabled {
+			channelSyncLock.Lock()
+			defer channelSyncLock.Unlock()
+			cached := channelsIDM[channel.Id]
+			if cached == nil {
+				return "", 0, types.NewError(errors.New("channel unavailable"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
+			cursor = &cached.ChannelInfo
+		} else {
+			latest, err := CacheGetChannelInfo(channel.Id)
+			if err != nil {
+				return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
+			cursor.MultiKeyPollingIndex = latest.MultiKeyPollingIndex
+			defer channel.SaveChannelInfo()
 		}
-		defer func() {
-			if common.DebugEnabled {
-				logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, channel.ChannelInfo.MultiKeyPollingIndex)
-			}
-			if !common.MemoryCacheEnabled {
-				_ = channel.SaveChannelInfo()
-			} else {
-				// CacheUpdateChannel(channel)
-			}
-		}()
 		// Start from the saved polling index and look for the next enabled key
-		start := channelInfo.MultiKeyPollingIndex
+		start := cursor.MultiKeyPollingIndex
 		if start < 0 || start >= len(keys) {
 			start = 0
 		}
@@ -294,7 +296,7 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 			idx := (start + i) % len(keys)
 			if getStatus(idx) == common.ChannelStatusEnabled {
 				// update polling index for next call (point to the next position)
-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+				cursor.MultiKeyPollingIndex = (idx + 1) % len(keys)
 				return keys[idx], idx, nil
 			}
 		}
@@ -698,23 +700,28 @@ func (channel *Channel) UpdateBalance(balance float64) {
 }
 
 func (channel *Channel) Delete() error {
-	var err error
-	result := DB.Where("supply_assignment_id IS NULL").Delete(channel)
-	if result.Error == nil && result.RowsAffected == 0 {
-		var managed int64
-		if err := DB.Model(&Channel{}).Where("id = ? AND supply_assignment_id IS NOT NULL", channel.Id).Count(&managed).Error; err != nil {
-			return err
-		}
-		if managed > 0 {
-			return ErrSupplyConflict
-		}
+	if channel == nil || channel.Id <= 0 {
+		return ErrSupplyInput
 	}
-	err = result.Error
-	if err != nil {
-		return err
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("id = ? AND supply_assignment_id IS NULL", channel.Id).Delete(&Channel{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			var remaining int64
+			if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Count(&remaining).Error; err != nil {
+				return err
+			}
+			if remaining != 0 {
+				return ErrSupplyConflict
+			}
+		}
+		return tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error
+	})
+	if err == nil {
+		BumpSyncTopic(SyncTopicChannels)
 	}
-	defer BumpSyncTopic(SyncTopicChannels)
-	err = channel.DeleteAbilities()
 	return err
 }
 

@@ -95,6 +95,12 @@ func callSupplyTarget[T any](ctx context.Context, targetID, method, path string,
 	if err != nil {
 		return zero, err
 	}
+	return requestSupplyReceiver[T](ctx, target.URL, key, method, path, body)
+}
+
+func requestSupplyReceiver[T any](ctx context.Context, baseURL, key, method, path string, body any) (T, error) {
+	var zero T
+	var err error
 	var buf []byte
 	if body != nil {
 		buf, err = common.Marshal(body)
@@ -102,7 +108,7 @@ func callSupplyTarget[T any](ctx context.Context, targetID, method, path string,
 			return zero, err
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(target.URL, "/")+"/api/supply-receiver/"+path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+"/api/supply-receiver/"+path, bytes.NewReader(buf))
 	if err != nil {
 		return zero, err
 	}
@@ -125,6 +131,44 @@ func callSupplyTarget[T any](ctx context.Context, targetID, method, path string,
 		return zero, errors.New("Target rejected the request")
 	}
 	return *envelope.Data, nil
+}
+
+// CheckSupplyCredential proves the new PAT can receive supply for the same
+// principal before the caller replaces the stored secret.
+func CheckSupplyCredential(ctx context.Context, target model.SupplyTarget, key string) (int, error) {
+	issuer, err := requestSupplyReceiver[int](ctx, target.URL, key, "GET", "identity", nil)
+	if err != nil || issuer <= 0 {
+		return 0, model.ErrSupplyInput
+	}
+	expected := target.Issuer
+	if expected == 0 && target.Secret != "" {
+		// Registrations predating the issuer column can establish identity
+		// from a previous receipt, even after their original PAT expires.
+		var a model.SupplyAssignment
+		err := model.DB.WithContext(ctx).Where("target = ? AND channel_id > 0", target.ID).First(&a).Error
+		switch {
+		case err == nil:
+			expected, err = requestSupplyReceiver[int](ctx, target.URL, key, "GET", "identity?assignment="+url.QueryEscape(a.ID), nil)
+			if err != nil || expected <= 0 {
+				return 0, model.ErrSupplyConflict
+			}
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			previous, err := openSupplySecret("target/"+target.ID, target.Secret)
+			if err != nil {
+				return 0, err
+			}
+			expected, err = requestSupplyReceiver[int](ctx, target.URL, previous, "GET", "identity", nil)
+			if err != nil || expected <= 0 {
+				return 0, model.ErrSupplyConflict
+			}
+		default:
+			return 0, err
+		}
+	}
+	if expected > 0 && expected != issuer {
+		return 0, model.ErrSupplyConflict
+	}
+	return issuer, nil
 }
 
 func ReconcileSupply(ctx context.Context, id string) error {
@@ -199,11 +243,17 @@ func CollectSupplyWindow(ctx context.Context, a model.SupplyAssignment, day int6
 		return cached, err
 	}
 	now := common.GetTimestamp()
-	if cached.Collected > 0 && (now-cached.Collected < 5 || day+2*86400 < now && cached.Collected >= day+2*86400) {
+	if !cached.Incomplete && cached.Collected > 0 && (now-cached.Collected < 5 || day+2*86400 < now && cached.Collected >= day+2*86400) {
 		return cached, nil
 	}
 	rows, err := callSupplyTarget[[]model.SupplyConsumption](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d", a.ID, day), nil)
 	if err != nil {
+		if cached.Collected > 0 {
+			cached.Incomplete = true
+			if markErr := model.DB.Model(&cached).Where("collected = ?", cached.Collected).Update("incomplete", true).Error; markErr != nil {
+				return cached, markErr
+			}
+		}
 		return cached, err
 	}
 	raw, err := common.Marshal(rows)
@@ -237,11 +287,20 @@ func SyncSupplyUsage() {
 		if err := model.DB.Where("channel_id > 0 AND (ended = 0 OR next_day <= ended + ?)", 86400).Find(&assignments).Error; err == nil {
 			for _, a := range assignments {
 				start := max(a.Started/86400*86400, a.NextDay)
-				for day := start; day <= today; day += 86400 {
-					if _, err := CollectSupplyWindow(context.Background(), a, day); err != nil {
-						break
+				last := today
+				if a.Ended > 0 {
+					last = min(last, (a.Ended/86400+1)*86400)
+				}
+				advance := true
+				for day := start; day <= last; day += 86400 {
+					if w, err := CollectSupplyWindow(context.Background(), a, day); err != nil || w.Incomplete {
+						advance = false
+						if err != nil {
+							break
+						}
+						continue
 					}
-					if day+2*86400 <= common.GetTimestamp() {
+					if advance && day+2*86400 <= common.GetTimestamp() {
 						if err := model.DB.Model(&a).Where("next_day < ?", day+86400).Update("next_day", day+86400).Error; err != nil {
 							break
 						}
@@ -251,4 +310,57 @@ func SyncSupplyUsage() {
 		}
 		time.Sleep(time.Minute)
 	}
+}
+
+// SyncRetiredSupplyUsage checks for late completions separately so an offline
+// former target cannot block collection for live channels or a console read.
+func SyncRetiredSupplyUsage() {
+	for {
+		var retired []model.SupplyAssignment
+		if err := model.DB.Where("channel_id > 0 AND ended > 0 AND next_day > ended + ?", 86400).Find(&retired).Error; err == nil {
+			for _, a := range retired {
+				if err := CollectRetiredSupplyUsage(context.Background(), a); err != nil {
+					common.SysError(common.LogText("late usage collection failed for assignment %s", a.ID))
+				}
+			}
+		}
+		time.Sleep(time.Hour)
+	}
+}
+
+func CollectRetiredSupplyUsage(ctx context.Context, a model.SupplyAssignment) error {
+	today := common.GetTimestamp() / 86400 * 86400
+	for start := a.NextDay; start <= today; {
+		day, err := callSupplyTarget[int64](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d&next=true", a.ID, start), nil)
+		if err != nil {
+			return err
+		}
+		next := today - 86400
+		if day != 0 {
+			if day < start || day > today || day%86400 != 0 {
+				return model.ErrSupplyInput
+			}
+			w, err := CollectSupplyWindow(ctx, a, day)
+			if err != nil || w.Incomplete {
+				return err
+			}
+			if day+2*86400 > today {
+				// Keep recent days open, but still collect the rest of this pass.
+				start = day + 86400
+				continue
+			}
+			next = day + 86400
+		}
+		if next > a.NextDay {
+			if err := model.DB.Model(&a).Where("next_day < ?", next).Update("next_day", next).Error; err != nil {
+				return err
+			}
+			a.NextDay = next
+		}
+		if day == 0 {
+			break
+		}
+		start = day + 86400
+	}
+	return nil
 }

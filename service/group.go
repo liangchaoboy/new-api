@@ -108,11 +108,11 @@ func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
 }
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重
-func GetGroupsEnabledModels(groups []string) []string {
+func GetGroupsEnabledModels(groups []string, userID int) []string {
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	for _, group := range groups {
-		for _, modelName := range model.GetGroupEnabledModels(group) {
+		for _, modelName := range model.GetGroupEnabledModels(group, userID) {
 			if _, ok := seen[modelName]; !ok {
 				seen[modelName] = struct{}{}
 				models = append(models, modelName)

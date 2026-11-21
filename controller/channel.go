@@ -985,7 +985,11 @@ func AddChannel(c *gin.Context) {
 }
 
 func DeleteChannel(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
+	id, parseErr := strconv.Atoi(c.Param("id"))
+	if parseErr != nil || id <= 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 	channelName := ""
 	channelProxy := ""
 	channelLookupFailed := false

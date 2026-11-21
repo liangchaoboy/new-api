@@ -624,16 +624,41 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
-	c.Set("original_model", modelName) // for retry
+	if channel != nil {
+		var err error
+		channel, err = channel.ActiveForUser(common.GetContextKeyInt(c, constant.ContextKeyUserId))
+		group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+		if group == "auto" {
+			group = common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+		}
+		if err != nil || !channel.ServesSupplyRoute(group, modelName) {
+			return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgDistributorChannelUnavailable)), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
+	return setupChannelContext(c, channel, modelName)
+}
+
+func SetupContextForChannelProbe(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	current, err := channel.ForHealthProbe()
+	if err != nil {
+		return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgDistributorChannelUnavailable)), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	return setupChannelContext(c, current, modelName)
+}
+
+func setupChannelContext(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	c.Set("original_model", modelName)
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {
 		logTaskPluginChannelDecision(c, nil, modelName, "channel_rejected", "nil_channel")
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
-	channel, accessErr := channel.ActiveForUser(common.GetContextKeyInt(c, constant.ContextKeyUserId))
-	if accessErr != nil {
-		return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgDistributorChannelUnavailable)), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	// Keep the binding for Realtime frames even when a node misses a close broadcast.
+	var bound *model.Channel
+	if channel.AssignedUserID != nil {
+		bound = channel
 	}
+	common.SetContextKey(c, constant.ContextKeyBoundChannel, bound)
 	if expectedPlugin != "" && !channelMatchesExpectedTaskPlugin(c, channel, expectedPlugin) {
 		logTaskPluginChannelDecision(c, channel, modelName, "channel_rejected", "identity_mismatch")
 		return types.NewError(

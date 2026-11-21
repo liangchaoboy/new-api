@@ -280,6 +280,7 @@ func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
+	require.NoError(t, db.Create(&model.Channel{Id: 1, Key: "fixture", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "default", Model: "zz-default-only-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-disabled-model", ChannelId: 1, Enabled: false},
@@ -334,6 +335,7 @@ func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
+	require.NoError(t, db.Create(&model.Channel{Id: 1, Key: "fixture", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "vip", Model: "zz-vip-model", ChannelId: 1, Enabled: true},
 		{Group: "vip", Model: "zz-shared-model", ChannelId: 1, Enabled: true},
@@ -374,6 +376,7 @@ func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
 	}).Error)
+	require.NoError(t, db.Create(&model.Channel{Id: 1, Key: "fixture", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "default", Model: "zz-tiered-visible-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-tiered-empty-expr-model", ChannelId: 1, Enabled: true},
@@ -493,6 +496,7 @@ func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 		"zz-token-tiered-empty-expr-model": "",
 	})
 	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&model.Channel{Id: 1, Key: "fixture", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "default", Model: "zz-token-tiered-visible-model", ChannelId: 1, Enabled: true},
 		{Group: "default", Model: "zz-token-tiered-empty-expr-model", ChannelId: 1, Enabled: true},
@@ -536,6 +540,7 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	})
 
 	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&model.Channel{Id: 1, Key: "fixture", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "vip", Model: "zz-vip-allowed", ChannelId: 1, Enabled: true},
 		{Group: "vip", Model: "zz-vip-denied", ChannelId: 1, Enabled: true},

@@ -153,8 +153,8 @@ func channelOwnerName(channelType int) string {
 	return strings.ToLower(constant.GetChannelTypeName(channelType))
 }
 
-func getPreferredModelOwners(modelNames []string, groups []string) map[string]string {
-	channelTypes, err := model.GetPreferredModelOwnerChannelTypes(modelNames, groups)
+func getPreferredModelOwners(modelNames []string, groups []string, userID int) map[string]string {
+	channelTypes, err := model.GetPreferredModelOwnerChannelTypes(modelNames, groups, userID)
 	if err != nil {
 		common.SysLog(common.LogText("GetPreferredModelOwnerChannelTypes error: %v", err))
 		return map[string]string{}
@@ -263,7 +263,7 @@ func ListModels(c *gin.Context, modelType int) {
 			tokenModelLimit = map[string]bool{}
 		}
 	}
-	models := service.GetGroupsEnabledModels(ownerGroups)
+	models := service.GetGroupsEnabledModels(ownerGroups, c.GetInt("id"))
 	for _, modelName := range models {
 		if modelLimitEnable {
 			matchingName := ratio_setting.RoutingMatchModelName(modelName)
@@ -279,7 +279,7 @@ func ListModels(c *gin.Context, modelType int) {
 
 	ownerByModel := map[string]string{}
 	if len(ownerGroups) > 0 {
-		ownerByModel = getPreferredModelOwners(userModelNames, ownerGroups)
+		ownerByModel = getPreferredModelOwners(userModelNames, ownerGroups, c.GetInt("id"))
 	}
 	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames))
 	for _, modelName := range userModelNames {

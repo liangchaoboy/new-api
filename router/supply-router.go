@@ -23,6 +23,7 @@ func registerSupplyRoutes(api *gin.RouterGroup) {
 	handlePermissionRoute(admin, "POST", "/targets", authz.ChannelSensitiveWrite, controller.SaveSupplyTarget)
 	handlePermissionRoute(admin, "PUT", "/targets/:id", authz.ChannelSensitiveWrite, controller.SaveSupplyTarget)
 	receiver := api.Group("/supply-receiver", middleware.DisableCache(), middleware.AdminAuth())
+	handlePermissionRoute(receiver, "GET", "/identity", authz.SupplyReceive, controller.SupplyReceiverIdentity)
 	handlePermissionRoute(receiver, "PUT", "/:id", authz.SupplyReceive, controller.ReceiveSupply)
 	handlePermissionRoute(receiver, "GET", "/:id/usage", authz.SupplyReceive, controller.ReadSupplyWindow)
 }

@@ -656,7 +656,7 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	if err == nil {
 		channel, err = channel.ActiveForUser(common.GetContextKeyInt(c, appconstant.ContextKeyUserId))
 	}
-	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
+	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.ServesSupplyRoute(s.lockedGroup, model) || !channel.GetSetting().ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	keyEnabled := channel.Key == s.lockedKey
