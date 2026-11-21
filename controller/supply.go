@@ -36,6 +36,8 @@ func supplyError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, errDirectRevokeFirst):
 		common.ApiErrorT(c, errDirectRevokeFirst.Error())
+	case errors.Is(err, service.ErrCustomerDenied):
+		common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage(service.ErrCustomerDenied.Error()))
 	case errors.Is(err, errSupplyForbidden):
 		common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
 	case errors.Is(err, model.ErrSupplyInput):
@@ -58,7 +60,10 @@ func SupplyTargets(c *gin.Context) {
 	common.ApiSuccess(c, targets)
 }
 func SaveSupplyTarget(c *gin.Context) {
-	var req struct{ Name, URL, Token, Username, Password string }
+	var req struct {
+		Name, URL, Token, Username, Password string
+		AccessMethod                         string `json:"access_method"`
+	}
 	if c.ShouldBindJSON(&req) != nil || len(req.Token) > 8192 || len(req.Password) > 2048 || len(req.Username) > 200 {
 		supplyError(c, model.ErrSupplyInput)
 		return
@@ -79,7 +84,7 @@ func SaveSupplyTarget(c *gin.Context) {
 				supplyError(c, err)
 				return
 			}
-			if target.Mode != model.SupplyTargetDirect {
+			if target.Mode != model.SupplyTargetDirect && target.Mode != model.SupplyTargetAccount {
 				supplyError(c, model.ErrSupplyConflict)
 				return
 			}
@@ -104,18 +109,43 @@ func SaveSupplyTarget(c *gin.Context) {
 			ref := hex.EncodeToString(sum[:])
 			target.AddressRef = &ref
 		}
-		uid, err := service.VerifySupplyAccount(c.Request.Context(), target.URL, strings.TrimSpace(req.Username), req.Password)
-		if err != nil {
-			common.ApiErrorT(c, err.Error())
+		previous := target
+		if req.AccessMethod != "" && req.AccessMethod != "saved_account" {
+			supplyError(c, model.ErrSupplyInput)
 			return
 		}
+		if req.AccessMethod == "saved_account" || target.Mode == model.SupplyTargetAccount {
+			target.LoginName = strings.TrimSpace(req.Username)
+			if target.LoginName == "" {
+				supplyError(c, model.ErrSupplyInput)
+				return
+			}
+			target.Issuer, target.AccountAPI, target.UsageAPI, err = service.CheckCustomerAccount(c.Request.Context(), target, req.Password)
+			if err != nil {
+				common.ApiErrorT(c, err.Error())
+				return
+			}
+			if c.Param("id") != "" && target.Mode == model.SupplyTargetAccount && previous.Issuer != target.Issuer {
+				supplyError(c, model.ErrSupplyConflict)
+				return
+			}
+			target.Mode = model.SupplyTargetAccount
+			target.Secret, err = service.SealCustomerPassword(target, req.Password)
+			if err != nil {
+				common.ApiErrorT(c, "Configure a persistent encryption secret")
+				return
+			}
+		} else {
+			target.Issuer, err = service.VerifySupplyAccount(c.Request.Context(), target.URL, strings.TrimSpace(req.Username), req.Password)
+			if err != nil {
+				common.ApiErrorT(c, err.Error())
+				return
+			}
+		}
 		if c.Param("id") == "" {
-			target.Issuer = uid
 			err = model.DB.Create(&target).Error
 		} else {
-			// The customer is bound by site address. A new verified contact
-			// account at the same site does not transfer any assignment.
-			err = model.DB.Model(&target).Update("issuer", uid).Error
+			err = model.UpdateSupplyAccount(previous, target)
 		}
 		if err != nil {
 			supplyError(c, err)
@@ -149,7 +179,7 @@ func SaveSupplyTarget(c *gin.Context) {
 			supplyError(c, err)
 			return
 		}
-		if target.Mode == model.SupplyTargetDirect {
+		if target.Mode == model.SupplyTargetDirect || target.Mode == model.SupplyTargetAccount {
 			supplyError(c, model.ErrSupplyInput)
 			return
 		}
@@ -279,10 +309,11 @@ func SaveSupplyResource(c *gin.Context) {
 
 func AssignSupply(c *gin.Context) {
 	var req struct {
-		Scope    string `json:"scope"`
-		Target   string `json:"target"`
-		UserID   int    `json:"user_id"`
-		Revision int64  `json:"revision"`
+		CustomerGroup string `json:"customer_group"`
+		Scope         string `json:"scope"`
+		Target        string `json:"target"`
+		UserID        int    `json:"user_id"`
+		Revision      int64  `json:"revision"`
 	}
 	if c.ShouldBindJSON(&req) != nil || req.UserID < 0 || (req.Target == "" && req.UserID != 0) {
 		supplyError(c, model.ErrSupplyInput)
@@ -294,10 +325,24 @@ func AssignSupply(c *gin.Context) {
 		}
 		if req.Target != "" {
 			var target model.SupplyTarget
-			if err := tx.Select("id", "mode").First(&target, "id = ?", req.Target).Error; err != nil {
+			if err := model.LockSupplyTarget(tx, req.Target, &target); err != nil {
 				return err
 			}
-			if target.Mode == model.SupplyTargetDirect {
+			if target.Mode == model.SupplyTargetAccount {
+				if target.AccountAPI != model.SupplyAPIOfficial {
+					return service.ErrCustomerDenied
+				}
+				req.CustomerGroup = strings.TrimSpace(req.CustomerGroup)
+				if req.CustomerGroup == "" {
+					req.CustomerGroup = "default"
+				}
+				if len(req.CustomerGroup) > 64 || strings.ContainsAny(req.CustomerGroup, ",\r\n") {
+					return model.ErrSupplyInput
+				}
+			} else {
+				req.CustomerGroup = ""
+			}
+			if target.Mode == model.SupplyTargetDirect || target.Mode == model.SupplyTargetAccount {
 				if req.UserID != 0 || req.Scope != "instance" {
 					return model.ErrSupplyInput
 				}
@@ -307,6 +352,7 @@ func AssignSupply(c *gin.Context) {
 		}
 		r.DirectState = ""
 		r.Revision++
+		r.CustomerGroup = req.CustomerGroup
 		r.Target = req.Target
 		r.UserID = req.UserID
 		r.LastError = ""
@@ -393,7 +439,7 @@ func SupplyUsage(c *gin.Context) {
 		return
 	}
 	savedDays := model.DB.Model(&model.SupplyWindow{}).Select("assignment_id").Where("day BETWEEN ? AND ?", from, to)
-	q := model.DB.Where("resource_id = ? AND user_id > 0 AND started < ?", resource.ID, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
+	q := model.DB.Where("resource_id = ? AND (user_id > 0 OR account_api = ?) AND started < ?", resource.ID, model.SupplyAPIOfficial, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
 	if uid := c.Query("user_id"); uid != "" {
 		v, e := strconv.Atoi(uid)
 		if e != nil || v <= 0 {
@@ -412,9 +458,10 @@ func SupplyUsage(c *gin.Context) {
 	}
 	type entry struct {
 		model.SupplyConsumption
-		Day    int64  `json:"day"`
-		Target string `json:"target"`
-		UserID int    `json:"user_id"`
+		Day       int64  `json:"day"`
+		Target    string `json:"target"`
+		UserID    int    `json:"user_id"`
+		ChannelID int    `json:"channel_id"`
 	}
 	rows := []entry{}
 	complete := true
@@ -465,14 +512,18 @@ func SupplyUsage(c *gin.Context) {
 				return
 			}
 			for _, v := range values {
+				if c.Query("model") != "" && v.ModelName == "" && a.AccountAPI == model.SupplyAPIOfficial {
+					complete = false
+					continue
+				}
 				if name := c.Query("model"); name == "" || name == v.ModelName {
-					rows = append(rows, entry{v, day, a.Target, a.UserID})
+					rows = append(rows, entry{v, day, a.Target, a.UserID, a.ChannelID})
 				}
 			}
 		}
 	}
 	var managed int64
-	if err := model.DB.Model(&model.SupplyAssignment{}).Where("resource_id = ? AND user_id > 0", resource.ID).Count(&managed).Error; err != nil {
+	if err := model.DB.Model(&model.SupplyAssignment{}).Where("resource_id = ? AND (user_id > 0 OR account_api = ?)", resource.ID, model.SupplyAPIOfficial).Count(&managed).Error; err != nil {
 		supplyError(c, err)
 		return
 	}

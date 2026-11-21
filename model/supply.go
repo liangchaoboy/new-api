@@ -22,6 +22,8 @@ type SupplyConfig struct {
 }
 
 const (
+	SupplyTargetAccount   = "customer_account"
+	SupplyAPIOfficial     = "official_channels"
 	SupplyTargetDirect    = "direct"
 	SupplyAwaitDelivery   = "await_delivery"
 	SupplyDelivered       = "delivered"
@@ -29,34 +31,41 @@ const (
 )
 
 type SupplyResource struct {
-	DirectState  string `json:"direct_state,omitempty" gorm:"size:32"`
-	ID           string `json:"id" gorm:"primaryKey;size:32"`
-	SupplierID   int    `json:"supplier_id" gorm:"index"`
-	SupplyConfig `gorm:"embedded"`
-	Secret       string            `json:"-" gorm:"type:text"`
-	Target       string            `json:"target" gorm:"size:96"`
-	UserID       int               `json:"user_id"`
-	Effective    *SupplyAssignment `json:"effective,omitempty" gorm:"-"`
-	ActiveID     string            `json:"active_id" gorm:"size:32"`
-	Revision     int64             `json:"revision"`
-	Applied      int64             `json:"applied"`
-	Archived     bool              `json:"archived"`
-	LastError    string            `json:"last_error" gorm:"size:256"`
+	CustomerGroup string `json:"customer_group,omitempty" gorm:"size:64"`
+	DirectState   string `json:"direct_state,omitempty" gorm:"size:32"`
+	ID            string `json:"id" gorm:"primaryKey;size:32"`
+	SupplierID    int    `json:"supplier_id" gorm:"index"`
+	SupplyConfig  `gorm:"embedded"`
+	Secret        string            `json:"-" gorm:"type:text"`
+	Target        string            `json:"target" gorm:"size:96"`
+	UserID        int               `json:"user_id"`
+	Effective     *SupplyAssignment `json:"effective,omitempty" gorm:"-"`
+	ActiveID      string            `json:"active_id" gorm:"size:32"`
+	Revision      int64             `json:"revision"`
+	Applied       int64             `json:"applied"`
+	Archived      bool              `json:"archived"`
+	LastError     string            `json:"last_error" gorm:"size:256"`
 }
 
 type SupplyAssignment struct {
-	KeyRef        *string `json:"-" gorm:"size:64;uniqueIndex"`
-	ProviderQuota *int64  `json:"provider_quota,omitempty"`
-	QuotaAt       int64   `json:"quota_at,omitempty"`
-	ID            string  `json:"id" gorm:"primaryKey;size:32"`
-	ResourceID    string  `json:"resource_id" gorm:"size:32;index"`
-	Target        string  `json:"target" gorm:"size:96"`
-	UserID        int     `json:"user_id"`
-	ChannelID     int     `json:"channel_id"`
-	Started       int64   `json:"started"`
-	Ended         int64   `json:"ended"`
-	NextDay       int64   `json:"-"`
-	Retiring      bool    `json:"retiring"`
+	AccountAPI string `json:"account_api,omitempty" gorm:"size:32"`
+	// Intent is persisted before sending a remote mutation. A lost response
+	// must be reconciled with the remote record before another write.
+	Intent         string  `json:"-" gorm:"size:16"`
+	IntentHash     string  `json:"-" gorm:"size:64"`
+	IntentRevision int64   `json:"-"`
+	KeyRef         *string `json:"-" gorm:"size:64;uniqueIndex"`
+	ProviderQuota  *int64  `json:"provider_quota,omitempty"`
+	QuotaAt        int64   `json:"quota_at,omitempty"`
+	ID             string  `json:"id" gorm:"primaryKey;size:32"`
+	ResourceID     string  `json:"resource_id" gorm:"size:32;index"`
+	Target         string  `json:"target" gorm:"size:96"`
+	UserID         int     `json:"user_id"`
+	ChannelID      int     `json:"channel_id"`
+	Started        int64   `json:"started"`
+	Ended          int64   `json:"ended"`
+	NextDay        int64   `json:"-"`
+	Retiring       bool    `json:"retiring"`
 }
 type SupplyEvent struct {
 	ID         int64  `json:"id" gorm:"primaryKey"`
@@ -87,6 +96,7 @@ type SupplyCommand struct {
 type SupplyConsumption struct {
 	ModelName    string `json:"model"`
 	Records      int64  `json:"records"`
+	Quota        *int64 `json:"quota,omitempty"`
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
 }
@@ -243,6 +253,9 @@ func (cfg SupplyConfig) Valid() bool {
 }
 
 type SupplyTarget struct {
+	UsageAPI   string  `json:"usage_api,omitempty" gorm:"size:32"`
+	LoginName  string  `json:"login_name,omitempty" gorm:"size:200"`
+	AccountAPI string  `json:"account_api,omitempty" gorm:"size:32"`
 	Mode       string  `json:"mode,omitempty" gorm:"size:16"`
 	AddressRef *string `json:"-" gorm:"size:64;uniqueIndex"`
 	Issuer     int     `json:"-"`
@@ -250,6 +263,36 @@ type SupplyTarget struct {
 	Name       string  `json:"name" gorm:"size:128"`
 	URL        string  `json:"url" gorm:"size:512"`
 	Secret     string  `json:"-" gorm:"type:text"`
+}
+
+// LockSupplyTarget serializes assignments with changes of delivery method.
+func LockSupplyTarget(tx *gorm.DB, id string, t *SupplyTarget) error {
+	return lockForUpdate(tx).First(t, "id = ?", id).Error
+}
+
+func UpdateSupplyAccount(previous, next SupplyTarget) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var current SupplyTarget
+		if err := LockSupplyTarget(tx, previous.ID, &current); err != nil {
+			return err
+		}
+		if current.Mode != previous.Mode || current.Issuer != previous.Issuer || current.Secret != previous.Secret {
+			return ErrSupplyConflict
+		}
+		if current.Mode != next.Mode {
+			var desired, active int64
+			if err := tx.Model(&SupplyResource{}).Where("target = ?", current.ID).Count(&desired).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&SupplyAssignment{}).Where("target = ? AND ended = 0", current.ID).Count(&active).Error; err != nil {
+				return err
+			}
+			if desired > 0 || active > 0 {
+				return ErrSupplyConflict
+			}
+		}
+		return tx.Model(&current).Select("issuer", "mode", "login_name", "account_api", "usage_api", "secret").Updates(&next).Error
+	})
 }
 
 func StoreSupplyWindow(w *SupplyWindow) error {
@@ -283,7 +326,7 @@ func StoreSupplyWindow(w *SupplyWindow) error {
 			}
 			for _, r := range previous {
 				n := byModel[r.ModelName]
-				if n.Records < r.Records || n.InputTokens < r.InputTokens || n.OutputTokens < r.OutputTokens {
+				if n.Records < r.Records || n.InputTokens < r.InputTokens || n.OutputTokens < r.OutputTokens || (r.Quota != nil && (n.Quota == nil || *n.Quota < *r.Quota)) {
 					*w = old
 					w.Incomplete = true
 					return tx.Model(w).Update("incomplete", true).Error

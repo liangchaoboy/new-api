@@ -188,7 +188,21 @@ func ReconcileSupply(ctx context.Context, id string) error {
 				r.LastError = ""
 				return nil
 			}
-			if r.UserID > 0 {
+			assignment = model.SupplyAssignment{ID: common.GetUUID(), ResourceID: r.ID, Target: r.Target, UserID: r.UserID, Started: common.GetTimestamp()}
+			if r.UserID == 0 {
+				var target model.SupplyTarget
+				if err := tx.Select("mode", "account_api").First(&target, "id = ?", r.Target).Error; err != nil {
+					return err
+				}
+				if target.Mode == model.SupplyTargetAccount {
+					if target.AccountAPI != model.SupplyAPIOfficial {
+						r.LastError = ErrCustomerDenied.Error()
+						return nil
+					}
+					assignment.AccountAPI = target.AccountAPI
+				}
+			}
+			if assignment.UserID > 0 || assignment.AccountAPI == model.SupplyAPIOfficial {
 				key, err := openSupplySecret("resource/"+r.ID, r.Secret)
 				if err != nil {
 					return err
@@ -202,7 +216,6 @@ func ReconcileSupply(ctx context.Context, id string) error {
 					return nil
 				}
 			}
-			assignment = model.SupplyAssignment{ID: common.GetUUID(), ResourceID: r.ID, Target: r.Target, UserID: r.UserID, Started: common.GetTimestamp()}
 			if err := tx.Create(&assignment).Error; err != nil {
 				return err
 			}
@@ -211,7 +224,7 @@ func ReconcileSupply(ctx context.Context, id string) error {
 			return err
 		}
 		retire := assignment.Retiring || assignment.Target != r.Target || assignment.UserID != r.UserID
-		if assignment.UserID == 0 {
+		if assignment.UserID == 0 && assignment.AccountAPI == "" {
 			if !retire {
 				r.DirectState = model.SupplyAwaitDelivery
 				return nil
@@ -241,6 +254,9 @@ func ReconcileSupply(ctx context.Context, id string) error {
 	})
 	if err != nil || command.Version == 0 {
 		return err
+	}
+	if assignment.AccountAPI == model.SupplyAPIOfficial {
+		return reconcileCustomerChannel(ctx, id, assignment, command)
 	}
 	receipt, sendErr := callSupplyTarget[model.SupplyReceipt](ctx, assignment.Target, "PUT", assignment.ID, command)
 	if sendErr == nil && (receipt.ID != assignment.ID || receipt.Version != command.Version || receipt.UserID != assignment.UserID || receipt.Retired != command.Retire || !receipt.Retired && receipt.ChannelID <= 0) {
@@ -285,7 +301,12 @@ func CollectSupplyWindow(ctx context.Context, a model.SupplyAssignment, day int6
 	if !cached.Incomplete && cached.Collected > 0 && (now-cached.Collected < 5 || day+2*86400 < now && cached.Collected >= day+2*86400) {
 		return cached, nil
 	}
-	rows, err := callSupplyTarget[[]model.SupplyConsumption](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d", a.ID, day), nil)
+	var rows []model.SupplyConsumption
+	if a.AccountAPI == model.SupplyAPIOfficial {
+		rows, err = customerDayUsage(ctx, a, day)
+	} else {
+		rows, err = callSupplyTarget[[]model.SupplyConsumption](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d", a.ID, day), nil)
+	}
 	if err != nil {
 		if cached.Collected > 0 {
 			cached.Incomplete = true
@@ -369,8 +390,20 @@ func SyncRetiredSupplyUsage() {
 
 func CollectRetiredSupplyUsage(ctx context.Context, a model.SupplyAssignment) error {
 	today := common.GetTimestamp() / 86400 * 86400
+	firstDay := a.NextDay
 	for start := a.NextDay; start <= today; {
-		day, err := callSupplyTarget[int64](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d&next=true", a.ID, start), nil)
+		var day int64
+		var err error
+		if a.AccountAPI == model.SupplyAPIOfficial {
+			// A's daily-export contract has no next-nonempty-day operation.
+			// Collect a bounded number of dates per background pass.
+			if start >= firstDay+7*86400 {
+				return nil
+			}
+			day = start
+		} else {
+			day, err = callSupplyTarget[int64](ctx, a.Target, "GET", fmt.Sprintf("%s/usage?day=%d&next=true", a.ID, start), nil)
+		}
 		if err != nil {
 			return err
 		}

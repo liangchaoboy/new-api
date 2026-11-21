@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -789,4 +790,109 @@ func TestDirectSupplyOrdinaryAccountRegistration(t *testing.T) {
 	require.NoError(t, model.DB.First(&target, "id = ?", target.ID).Error)
 	assert.Equal(t, uid, target.Issuer)
 	assert.Empty(t, target.Secret)
+}
+
+// Stock channel creation may commit before B receives an acknowledgement.
+// The same persisted assignment must recover the original ID without another POST.
+func TestCustomerSupplyUncertainWriteAndScopedUsage(t *testing.T) {
+	owner := setupChannelCreateTest(t)
+	t.Setenv("CRYPTO_SECRET", "customer-test-only")
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.SupplyTarget{}, &model.SupplyResource{}, &model.SupplyAssignment{}, &model.SupplyEvent{}, &model.SupplyWindow{}))
+	var visible atomic.Bool
+	var creates atomic.Int64
+	var remote atomic.Value
+	day := (common.GetTimestamp()/86400 - 1) * 86400
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/status":
+			fmt.Fprint(w, `{"success":true,"data":{}}`)
+		case "/api/user/login":
+			fmt.Fprint(w, `{"success":true,"data":{"id":7,"access_token":"fixture"}}`)
+		case "/api/user/self":
+			fmt.Fprint(w, `{"success":true,"data":{"id":7,"username":"customer"}}`)
+		case "/api/channel/search":
+			rows := []any{}
+			if row := remote.Load(); visible.Load() && row != nil {
+				rows = append(rows, row)
+			}
+			raw, err := common.Marshal(rows)
+			if !assert.NoError(t, err) {
+				return
+			}
+			fmt.Fprintf(w, `{"success":true,"data":{"items":%s,"total":%d}}`, raw, len(rows))
+		case "/api/channel/":
+			if !assert.Equal(t, "POST", req.Method) {
+				return
+			}
+			var payload struct{ Channel map[string]any }
+			if !assert.NoError(t, common.DecodeJson(req.Body, &payload)) {
+				return
+			}
+			delete(payload.Channel, "key")
+			payload.Channel["id"] = 53
+			payload.Channel["status"] = 1
+			remote.Store(payload.Channel)
+			creates.Add(1)
+			// A stored the channel but its acknowledgement was truncated.
+			fmt.Fprint(w, `{"success":`)
+		case "/api/data/channel_daily":
+			assert.Equal(t, "log", req.URL.Query().Get("source"))
+			assert.Equal(t, "0", req.URL.Query().Get("tz_offset"))
+			fmt.Fprintf(w, `{"success":true,"data":[{"channel_id":99,"count":77},{"channel_id":53,"day":%d,"count":2,"prompt_tokens":12,"completion_tokens":3,"quota":4}]}`, day)
+		case "/api/log/":
+			// A misconfigured server ignores the channel filter.
+			fmt.Fprintf(w, `{"success":true,"data":{"total":1,"items":[{"channel":99,"type":2,"created_at":%d,"model_name":"demo","prompt_tokens":1,"completion_tokens":1,"quota":1}]}}`, day)
+		default:
+			t.Errorf("unexpected request %s", req.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer site.Close()
+	target := model.SupplyTarget{ID: common.GetUUID(), Mode: model.SupplyTargetAccount, URL: site.URL, LoginName: "customer", Issuer: 7, AccountAPI: model.SupplyAPIOfficial, UsageAPI: "channel_daily"}
+	var err error
+	target.Secret, err = service.SealCustomerPassword(target, "fixture-password")
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&target).Error)
+	id := common.GetUUID()
+	secret, err := service.SealSupplySecret("resource/"+id, "fixture-key")
+	require.NoError(t, err)
+	r := model.SupplyResource{ID: id, SupplierID: owner, Target: target.ID, Secret: secret, CustomerGroup: "default", Revision: 2, Applied: 1, SupplyConfig: model.SupplyConfig{Name: "sample", Type: 1, Models: "demo"}}
+	require.NoError(t, db.Create(&r).Error)
+	t.Cleanup(func() {
+		var ids []string
+		require.NoError(t, db.Model(&model.SupplyAssignment{}).Where("resource_id = ?", id).Pluck("id", &ids).Error)
+		require.NoError(t, db.Where("assignment_id IN ?", ids).Delete(&model.SupplyWindow{}).Error)
+		require.NoError(t, db.Where("resource_id = ?", id).Delete(&model.SupplyAssignment{}).Error)
+		require.NoError(t, db.Where("resource_id = ?", id).Delete(&model.SupplyEvent{}).Error)
+		require.NoError(t, db.Delete(&r).Error)
+		require.NoError(t, db.Delete(&target).Error)
+	})
+	require.NoError(t, service.ReconcileSupply(t.Context(), id))
+	require.NoError(t, service.ReconcileSupply(t.Context(), id))
+	assert.EqualValues(t, 1, creates.Load())
+	visible.Store(true)
+	require.NoError(t, service.ReconcileSupply(t.Context(), id))
+	require.NoError(t, db.First(&r, "id = ?", id).Error)
+	assert.Equal(t, r.Revision, r.Applied)
+	var assignment model.SupplyAssignment
+	require.NoError(t, db.First(&assignment, "id = ?", r.ActiveID).Error)
+	assert.Equal(t, 53, assignment.ChannelID)
+	window, err := service.CollectSupplyWindow(t.Context(), assignment, day)
+	require.NoError(t, err)
+	var rows []model.SupplyConsumption
+	require.NoError(t, common.UnmarshalJsonStr(window.Content, &rows))
+	quota := int64(4)
+	assert.Equal(t, []model.SupplyConsumption{{Records: 2, InputTokens: 12, OutputTokens: 3, Quota: &quota}}, rows)
+	require.NoError(t, db.Model(&target).Update("usage_api", "channel_logs").Error)
+	_, err = service.CollectSupplyWindow(t.Context(), assignment, day-86400)
+	require.Error(t, err)
+	// If the account temporarily loses sight of a channel, reassignment must wait.
+	visible.Store(false)
+	require.NoError(t, db.Model(&r).Updates(map[string]any{"target": "", "revision": 3}).Error)
+	require.NoError(t, service.ReconcileSupply(t.Context(), id))
+	require.NoError(t, db.First(&r, "id = ?", id).Error)
+	assert.Equal(t, assignment.ID, r.ActiveID)
+	assert.Less(t, r.Applied, r.Revision)
+	assert.EqualValues(t, 1, creates.Load())
 }

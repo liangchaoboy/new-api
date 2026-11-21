@@ -33,6 +33,7 @@ export type SupplyResource = {
   archived: boolean
   effective?: { target: string; user_id: number; channel_id: number }
   direct_state?: string
+  customer_group?: string
   active_id?: string
   last_error: string
 }
@@ -40,6 +41,9 @@ export type SupplyTarget = {
   id: string
   name: string
   url: string
+  login_name?: string
+  account_api?: string
+  usage_api?: string
   mode?: string
 }
 export type SupplyEvent = {
@@ -59,9 +63,11 @@ export type SupplyUsage = {
     day: number
     target: string
     user_id: number
+    channel_id: number
     model: string
     records: number
     input_tokens: number
+    quota?: number
     output_tokens: number
   }[]
 }

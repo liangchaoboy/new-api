@@ -91,6 +91,8 @@ export function SupplyReport(props: {
     usage.data?.has_windows ||
     (!provider.data?.length && !props.resource.direct_state)
   const actionNames: Record<string, string> = {
+    customer_channel_saved: t('Customer channel confirmed'),
+    customer_channel_removed: t('Customer channel retired'),
     key_exported: t('Credentials exported'),
     revocation_confirmed: t('Upstream revocation confirmed'),
     created: t('Created'),
@@ -305,12 +307,27 @@ export function SupplyReport(props: {
                     header: t('Target'),
                     cell: (r) => targetName(r.target),
                   },
-                  { id: 'uid', header: t('User ID'), cell: (r) => r.user_id },
+                  {
+                    id: 'uid',
+                    header: t('User ID'),
+                    cell: (r) => r.user_id || '—',
+                  },
                   { id: 'model', header: t('Model'), cell: (r) => r.model },
                   {
                     id: 'records',
                     header: t('Records'),
                     cell: (r) => formatNumber(r.records, locale),
+                  },
+                  {
+                    id: 'channel',
+                    header: t('Channel ID'),
+                    cell: (r) => formatNumber(r.channel_id, locale),
+                  },
+                  {
+                    id: 'quota',
+                    header: t('Used Quota'),
+                    cell: (r) =>
+                      r.quota == null ? '—' : formatNumber(r.quota, locale),
                   },
                   {
                     id: 'in',

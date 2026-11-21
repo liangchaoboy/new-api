@@ -138,6 +138,11 @@ export function ResourceEditor(props: {
   )
 }
 
+function targetDescription(target: SupplyTarget) {
+  if (target.login_name) return `${target.login_name} @ ${target.url}`
+  return target.mode ? target.url : target.name
+}
+
 export function TargetEditor(props: {
   targets: SupplyTarget[]
   close: () => void
@@ -148,8 +153,8 @@ export function TargetEditor(props: {
     defaultValues: { id: '', url: '', username: '', password: '', token: '' },
   })
   const id = form.watch('id')
-  const legacy =
-    !!id && props.targets.find((target) => target.id === id)?.mode !== 'direct'
+  const selected = props.targets.find((target) => target.id === id)
+  const legacy = !!id && !selected?.mode
   const save = useMutation({
     gcTime: 0,
     retry: false,
@@ -160,7 +165,12 @@ export function TargetEditor(props: {
         v.id ? 'PUT' : 'POST',
         legacy
           ? { token: v.token }
-          : { url: v.url, username: v.username, password: v.password }
+          : {
+              url: v.url,
+              username: v.username,
+              password: v.password,
+              access_method: 'saved_account',
+            }
       )
     },
     onSuccess: () => {
@@ -186,7 +196,7 @@ export function TargetEditor(props: {
             <NativeSelectOption value=''>{t('Create')}</NativeSelectOption>
             {props.targets.map((row) => (
               <NativeSelectOption key={row.id} value={row.id}>
-                {row.mode === 'direct' ? row.url : row.name}
+                {targetDescription(row)}
               </NativeSelectOption>
             ))}
           </NativeSelect>
@@ -230,7 +240,9 @@ export function TargetEditor(props: {
               />
             </Label>
             <p className='text-muted-foreground text-sm'>
-              {t('The account is verified once. Its password is not stored.')}
+              {t(
+                'The reseller encrypts the customer password to submit channels and collect channel usage.'
+              )}
             </p>
           </>
         )}
@@ -251,17 +263,27 @@ export function AssignmentEditor(props: {
   const { t } = useTranslation()
   const r = props.resource
   const form = useForm({
-    defaultValues: { target: r.target, user_id: r.user_id || undefined },
+    defaultValues: {
+      target: r.target,
+      user_id: r.user_id || undefined,
+      customer_group: r.customer_group || 'default',
+    },
   })
   const selectedTarget = form.watch('target')
-  const direct =
-    props.targets.find((x) => x.id === selectedTarget)?.mode === 'direct'
+  const target = props.targets.find((x) => x.id === selectedTarget)
+  const instance = !!target?.mode
+  const account = target?.mode === 'customer_account'
   const save = useMutation({
-    mutationFn: (v: { target: string; user_id: number | undefined }) =>
+    mutationFn: (v: {
+      target: string
+      user_id: number | undefined
+      customer_group: string
+    }) =>
       supplyRequest(`resources/${r.id}/assignment`, 'PUT', {
         ...v,
-        user_id: direct ? 0 : v.user_id,
-        scope: direct ? 'instance' : 'user',
+        user_id: instance ? 0 : v.user_id,
+        customer_group: account ? v.customer_group : undefined,
+        scope: instance ? 'instance' : 'user',
         revision: r.revision,
       }),
     onSuccess: props.saved,
@@ -284,18 +306,37 @@ export function AssignmentEditor(props: {
             <NativeSelectOption value=''>—</NativeSelectOption>
             {props.targets.map((row) => (
               <NativeSelectOption key={row.id} value={row.id}>
-                {row.mode === 'direct' ? row.url : row.name}
+                {targetDescription(row)}
               </NativeSelectOption>
             ))}
           </NativeSelect>
         </Label>
-        {direct ? (
+        {account && (
+          <>
+            <p>
+              {target?.account_api
+                ? t(
+                    'The reseller writes this channel to the customer account and reads back its ID.'
+                  )
+                : t('Customer account lacks the required permissions')}
+            </p>
+            {!target?.usage_api && (
+              <p role='status'>{t('Usage data is incomplete')}</p>
+            )}
+            <Label>
+              {t('Group')}
+              <Input required {...form.register('customer_group')} />
+            </Label>
+          </>
+        )}
+        {instance && !account && (
           <p className='text-muted-foreground text-sm'>
             {t(
               'Assign to this customer instance. Its administrator installs the upstream credentials.'
             )}
           </p>
-        ) : (
+        )}
+        {!instance && (
           <Label>
             {t('User ID')}
             <Input
@@ -307,7 +348,10 @@ export function AssignmentEditor(props: {
             />
           </Label>
         )}
-        <Button type='submit' disabled={save.isPending}>
+        <Button
+          type='submit'
+          disabled={save.isPending || (account && !target?.account_api)}
+        >
           {t('Save')}
         </Button>
       </form>

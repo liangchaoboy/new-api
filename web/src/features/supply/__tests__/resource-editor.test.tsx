@@ -152,57 +152,71 @@ it('registers a direct instance using its URL and ordinary account without askin
     url: 'https://customer.example',
     username: 'partner',
     password: 'fixture-only',
+    access_method: 'saved_account',
   })
 })
 
-it('assigns a standard customer instance without a downstream UID', async () => {
-  const { AssignmentEditor } = await import('../editor')
-  const user = userEvent.setup()
-  const saved = vi.fn()
-  vi.mocked(supplyRequest).mockResolvedValue(null)
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <AssignmentEditor
-        targets={[
-          {
-            id: 'target',
-            name: 'customer',
-            url: 'https://customer.example',
-            mode: 'direct',
-          },
-        ]}
-        resource={{
-          id: 'c',
-          supplier_id: 1,
-          name: 'Channel',
-          models: 'm',
-          type: 1,
-          base_url: '',
-          target: '',
-          user_id: 0,
-          revision: 1,
-          applied: 1,
-          archived: false,
-          last_error: '',
-        }}
-        close={vi.fn()}
-        saved={saved}
-      />
-    </QueryClientProvider>
-  )
-  await user.selectOptions(
-    screen.getByRole('combobox', { name: 'Target' }),
-    'target'
-  )
-  expect(
-    screen.queryByRole('spinbutton', { name: 'User ID' })
-  ).not.toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: 'Save' }))
-  await waitFor(() => expect(saved).toHaveBeenCalledOnce())
-  expect(supplyRequest).toHaveBeenCalledWith('resources/c/assignment', 'PUT', {
-    target: 'target',
-    user_id: 0,
-    revision: 1,
-    scope: 'instance',
-  })
-})
+it.each(['customer_account', 'direct'])(
+  'assigns a %s customer instance without a downstream UID',
+  async (mode) => {
+    const { AssignmentEditor } = await import('../editor')
+    const user = userEvent.setup()
+    const saved = vi.fn()
+    vi.mocked(supplyRequest).mockResolvedValue(null)
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <AssignmentEditor
+          targets={[
+            {
+              id: 'target',
+              name: 'customer',
+              url: 'https://customer.example',
+              mode,
+              account_api: 'official_channels',
+              usage_api: 'channel_logs',
+            },
+          ]}
+          resource={{
+            id: 'c',
+            supplier_id: 1,
+            name: 'Channel',
+            models: 'm',
+            type: 1,
+            base_url: '',
+            target: '',
+            user_id: 0,
+            revision: 1,
+            applied: 1,
+            archived: false,
+            last_error: '',
+          }}
+          close={vi.fn()}
+          saved={saved}
+        />
+      </QueryClientProvider>
+    )
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Target' }),
+      'target'
+    )
+    if (mode === 'customer_account') {
+      expect(screen.getByLabelText('Group')).toHaveValue('default')
+    }
+    expect(
+      screen.queryByRole('spinbutton', { name: 'User ID' })
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce())
+    expect(supplyRequest).toHaveBeenCalledWith(
+      'resources/c/assignment',
+      'PUT',
+      {
+        target: 'target',
+        user_id: 0,
+        revision: 1,
+        scope: 'instance',
+        customer_group: mode === 'customer_account' ? 'default' : undefined,
+      }
+    )
+  }
+)

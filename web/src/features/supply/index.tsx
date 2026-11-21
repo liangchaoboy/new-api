@@ -100,7 +100,7 @@ export function SupplyPage() {
   })
   const targetLabel = (id: string, uid: number) => {
     const target = targets.data?.find((v) => v.id === id)
-    const name = target?.mode === 'direct' ? target.url : (target?.name ?? id)
+    const name = target?.mode ? target.url : (target?.name ?? id)
     return uid ? `${name} / ${uid}` : name
   }
   const r = view?.resource
@@ -147,7 +147,14 @@ export function SupplyPage() {
                 header: t('Confirmed target'),
                 cell: (x) =>
                   x.effective
-                    ? targetLabel(x.effective.target, x.effective.user_id)
+                    ? [
+                        targetLabel(x.effective.target, x.effective.user_id),
+                        x.effective.channel_id > 0
+                          ? `#${x.effective.channel_id}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
                     : '—',
               },
               {
