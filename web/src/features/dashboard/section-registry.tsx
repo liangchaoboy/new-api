@@ -30,6 +30,11 @@ const DASHBOARD_SECTIONS = [
     build: () => null,
   },
   {
+    id: 'supply',
+    titleKey: 'Supplied channel usage',
+    build: () => null,
+  },
+  {
     id: 'models',
     titleKey: 'Model Call Analytics',
     build: () => null,
@@ -37,11 +42,6 @@ const DASHBOARD_SECTIONS = [
   {
     id: 'flow',
     titleKey: 'Flow',
-    build: () => null,
-  },
-  {
-    id: 'supply',
-    titleKey: 'Supplied channel usage',
     build: () => null,
   },
   {

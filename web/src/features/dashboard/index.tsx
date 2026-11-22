@@ -360,6 +360,9 @@ export function Dashboard() {
           </div>
           {activeSection === 'models' && (
             <>
+              <Suspense fallback={null}>
+                <LazySupplierUsageView summary compact />
+              </Suspense>
               <FadeIn>
                 <Suspense fallback={<LogStatCardsFallback />}>
                   <LazyLogStatCards

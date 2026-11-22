@@ -36,7 +36,10 @@ function utcDate(timestamp: number) {
   return new Date(timestamp).toISOString().slice(0, 10)
 }
 
-export function SupplierUsageView(props: { summary?: boolean }) {
+export function SupplierUsageView(props: {
+  summary?: boolean
+  compact?: boolean
+}) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const viewer = useAuthStore((s) => s.auth.user?.id)
@@ -76,6 +79,38 @@ export function SupplierUsageView(props: { summary?: boolean }) {
     { label: t('Output tokens'), value: totals.output },
     { label: t('Total Tokens'), value: totals.input + totals.output },
   ]
+  const showSummary = usage.data && (usage.data.complete || rows.length > 0)
+  const summaryCards = showSummary && (
+    <div className='grid grid-cols-2 gap-3 lg:grid-cols-4'>
+      {cards.map((card) => (
+        <Card key={card.label} size='sm'>
+          <CardHeader>
+            <CardTitle>{card.label}</CardTitle>
+          </CardHeader>
+          <CardContent className='text-2xl font-semibold tabular-nums'>
+            {formatNumber(card.value, locale)}
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  )
+  if (props.compact) {
+    if (!usage.data?.has_windows) return null
+    return (
+      <section className='grid gap-2'>
+        <div className='flex flex-wrap items-baseline justify-between gap-2'>
+          <h3 className='font-semibold'>{t('Supplied channel usage')}</h3>
+          <span className='text-muted-foreground text-sm'>
+            {from} – {to} (UTC)
+          </span>
+        </div>
+        {!usage.data.complete && (
+          <p role='status'>{t('Usage data is incomplete')}</p>
+        )}
+        {summaryCards}
+      </section>
+    )
+  }
   return (
     <section className='grid gap-4'>
       <div className='flex flex-wrap items-end gap-3'>
@@ -135,23 +170,7 @@ export function SupplierUsageView(props: { summary?: boolean }) {
           {new Date(usage.data.as_of * 1000).toLocaleString(locale)}
         </p>
       )}
-      {valid &&
-        props.summary &&
-        usage.data &&
-        (usage.data.complete || rows.length > 0) && (
-          <div className='grid grid-cols-2 gap-3 lg:grid-cols-4'>
-            {cards.map((card) => (
-              <Card key={card.label} size='sm'>
-                <CardHeader>
-                  <CardTitle>{card.label}</CardTitle>
-                </CardHeader>
-                <CardContent className='text-2xl font-semibold tabular-nums'>
-                  {formatNumber(card.value, locale)}
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        )}
+      {valid && props.summary && summaryCards}
       {!props.summary && (
         <p className='text-muted-foreground text-sm'>
           {t('Daily totals for your supplied channels.')}
