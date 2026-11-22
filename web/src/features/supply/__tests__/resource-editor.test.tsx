@@ -83,15 +83,18 @@ it('opens the creation form from the supplier channel list', async () => {
   ).toBeInTheDocument()
 })
 
-it('shows reports and hides channel changes for a read-only admin viewing another supplier', async () => {
+it('keeps a restricted admin from viewing downstream identities or assigning channels', async () => {
   const { SupplyPage } = await import('../index')
   useAuthStore.getState().auth.setUser({
     id: 8,
     username: 'reader',
     role: 10,
-    permissions: { admin_permissions: { channel: { read: true } } },
+    permissions: {
+      admin_permissions: { channel: { read: true, write: true } },
+    },
   })
   try {
+    vi.mocked(supplyRequest).mockClear()
     vi.mocked(supplyRequest).mockImplementation(async (path) =>
       path === 'targets'
         ? []
@@ -99,7 +102,14 @@ it('shows reports and hides channel changes for a read-only admin viewing anothe
             {
               id: 'c',
               name: 'Supplier C',
-              supplier_id: 9,
+              supplier_id: 8,
+              assigned: true,
+              target: 'private-downstream',
+              effective: {
+                target: 'private-downstream',
+                user_id: 12,
+                channel_id: 34,
+              },
               revision: 1,
               applied: 1,
             },
@@ -112,13 +122,15 @@ it('shows reports and hides channel changes for a read-only admin viewing anothe
     )
     expect(await screen.findByText('Supplier C')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Usage' })).toBeInTheDocument()
-    for (const name of [
-      'Edit',
-      'Assign channel',
-      'Withdraw',
-      'Delete',
-      'Downstream instances',
-    ]) {
+    expect(screen.getByText('Applied')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Withdraw' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('columnheader', { name: 'Confirmed target' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('private-downstream')).not.toBeInTheDocument()
+    expect(supplyRequest).not.toHaveBeenCalledWith('targets')
+    for (const name of ['Assign channel', 'Downstream instances']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
     }
   } finally {

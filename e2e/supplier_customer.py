@@ -245,7 +245,17 @@ def run(reseller, stock, test_clickhouse=False):
         initial = [center.confirmed(r)["effective"]["channel_id"] for r in resources]
         assert initial[0] != initial[1]
         for user, rid in zip(suppliers, resources):
-            assert [r["id"] for r in center.api("/api/supply/resources", user=user)] == [rid]
+            rows = center.api("/api/supply/resources", user=user)
+            assert [r["id"] for r in rows] == [rid]
+            assert rows[0]["assigned"] and not rows[0]["target"] and "effective" not in rows[0]
+            assert (
+                request(center.url, "/api/supply/targets", bearer=user, expect_success=False)[
+                    "success"
+                ]
+                is False
+            )
+            events = center.api(f"/api/supply/resources/{rid}/history", user=user)
+            assert events and all(not row["target"] and not row["user_id"] for row in events)
         other_path = f"/api/supply/resources/{resources[0]}"
         day = int(time.time()) // 86400 * 86400
         for suffix in ("/history", f"/usage?from={day}&to={day}"):
@@ -277,13 +287,19 @@ def run(reseller, stock, test_clickhouse=False):
             rows = center.usage(rid, user, target)["rows"]
             assert sum(r["input_tokens"] for r in rows) == expected * 12
             assert sum(r["output_tokens"] for r in rows) == expected * 4
-            assert all(r["quota"] >= 0 and r["channel_id"] > 0 for r in rows)
+            assert all(r["quota"] >= 0 for r in rows)
+            if user == center.admin:
+                assert all(r["channel_id"] > 0 for r in rows)
+            else:
+                assert all(
+                    not r["channel_id"] and not r["user_id"] and not r["target"] for r in rows
+                )
 
         for _ in range(9):
             infer(0, models[0])
         infer(0, models[1])
-        count(resources[0], targets[0], suppliers[0], 9)
-        count(resources[1], targets[0], suppliers[1], 1)
+        count(resources[0], "", suppliers[0], 9)
+        count(resources[1], "", suppliers[1], 1)
         keys[models[0]] = secrets.token_hex(20)
         center.api(
             other_path,
@@ -303,10 +319,10 @@ def run(reseller, stock, test_clickhouse=False):
         infer(0, models[0], False)
         for _ in range(6):
             infer(1, models[0])
-        for user in (center.admin, suppliers[0]):
-            count(resources[0], targets[0], user, 10)
-            count(resources[0], targets[1], user, 6)
-            count(resources[0], "", user, 16)
+        count(resources[0], targets[0], center.admin, 10)
+        count(resources[0], targets[1], center.admin, 6)
+        count(resources[0], "", center.admin, 16)
+        count(resources[0], "", suppliers[0], 16)
         center.api(
             other_path + "?revision=" + str(center.row(resources[0])["revision"]),
             "DELETE",

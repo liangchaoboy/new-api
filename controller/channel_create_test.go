@@ -896,3 +896,64 @@ func TestCustomerSupplyUncertainWriteAndScopedUsage(t *testing.T) {
 	assert.Less(t, r.Applied, r.Revision)
 	assert.EqualValues(t, 1, creates.Load())
 }
+
+func TestSupplyDownstreamIdentityRequiresSensitiveChannelAccess(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.SupplyResource{}, &model.SupplyTarget{}, &model.SupplyAssignment{}, &model.SupplyEvent{}, &model.SupplyWindow{}))
+	const supplier, manager = 91, 92
+	for _, id := range []int{supplier, manager} {
+		require.NoError(t, authz.SetUserPermissions(id, authz.PermissionsMap{authz.ResourceChannel: {
+			authz.ActionRead: true, authz.ActionWrite: true, authz.ActionSensitiveWrite: id == manager,
+		}}))
+	}
+	day := (common.GetTimestamp()/86400 - 1) * 86400
+	target := model.SupplyTarget{ID: common.GetUUID(), Name: "private-downstream-name", URL: "https://private-downstream.invalid", LoginName: "private-downstream-login", Mode: model.SupplyTargetAccount}
+	r := model.SupplyResource{ID: common.GetUUID(), SupplyConfig: model.SupplyConfig{Name: "Visible supply"}, SupplierID: supplier, Target: target.ID, ActiveID: common.GetUUID(), UserID: 9017, CustomerGroup: "private-group", Revision: 2, Applied: 2}
+	a := model.SupplyAssignment{ID: r.ActiveID, ResourceID: r.ID, Target: target.ID, UserID: r.UserID, ChannelID: 8017, Started: day}
+	provider := model.SupplyAssignment{ID: common.GetUUID(), ResourceID: r.ID, Target: target.ID, KeyRef: new(string), Ended: day, ProviderQuota: new(int64)}
+	*provider.KeyRef = common.GetUUID()
+	*provider.ProviderQuota = 15
+	for _, row := range []any{&target, &r, &a, &provider,
+		&model.SupplyEvent{ResourceID: r.ID, Target: target.ID, UserID: r.UserID, Action: "applied", Revision: 2},
+		&model.SupplyWindow{AssignmentID: a.ID, Day: day, Collected: day + 86400, Content: `[{"model":"demo","records":3}]`},
+	} {
+		require.NoError(t, db.Create(row).Error)
+	}
+	call := func(user int, handler gin.HandlerFunc, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Set("id", user)
+		c.Set("role", common.RoleAdminUser)
+		c.Params = gin.Params{{Key: "id", Value: r.ID}}
+		c.Request = httptest.NewRequest(method, path, strings.NewReader(body))
+		handler(c)
+		return rec
+	}
+	usagePath := fmt.Sprintf("/?from=%d&to=%d", day, day)
+	for _, endpoint := range []struct {
+		handler      gin.HandlerFunc
+		path, metric string
+	}{
+		{ListSupplyResources, "/", `"assigned":true`},
+		{SupplyHistory, "/", `"action":"applied"`},
+		{SupplyUsage, usagePath, `"records":3`},
+		{DirectProviderUsage, "/", `"total_used":15`},
+	} {
+		limited := call(supplier, endpoint.handler, "GET", endpoint.path, "")
+		assert.Equal(t, http.StatusOK, limited.Code)
+		for _, private := range []string{target.ID, target.URL, target.Name, target.LoginName, r.CustomerGroup, "9017", "8017", a.ID} {
+			assert.NotContains(t, limited.Body.String(), private)
+		}
+		assert.Contains(t, limited.Body.String(), endpoint.metric)
+		full := call(manager, endpoint.handler, "GET", endpoint.path, "")
+		assert.Contains(t, full.Body.String(), target.ID)
+	}
+	assert.Equal(t, http.StatusForbidden, call(supplier, SupplyTargets, "GET", "/", "").Code)
+	assert.Contains(t, call(manager, SupplyTargets, "GET", "/", "").Body.String(), target.URL)
+	assert.Equal(t, http.StatusForbidden, call(supplier, SupplyUsage, "GET", usagePath+"&target="+target.ID, "").Code)
+	assert.Equal(t, http.StatusForbidden, call(supplier, SupplyUsage, "GET", usagePath+"&user_id=9017", "").Code)
+	assert.Contains(t, call(manager, SupplyUsage, "GET", usagePath+"&target="+target.ID, "").Body.String(), `"records":3`)
+	assert.Equal(t, http.StatusForbidden, call(supplier, AssignSupply, "PUT", "/", `{"revision":2}`).Code)
+}

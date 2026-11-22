@@ -28,6 +28,14 @@ func supplyOwnerScope(c *gin.Context, permission authz.Permission) int {
 	return id
 }
 
+// Downstream identities are only visible to administrators who can manage
+// sensitive channel configuration and have permission to read channels.
+func canViewSupplyTargets(c *gin.Context) bool {
+	id, role := c.GetInt("id"), c.GetInt("role")
+	return role >= common.RoleAdminUser && authz.Can(id, role, authz.ChannelRead) &&
+		authz.Can(id, role, authz.ChannelSensitiveWrite)
+}
+
 var errDirectRevokeFirst = errors.New("Revoke the delivered key first")
 
 var errSupplyForbidden = errors.New("insufficient privileges")
@@ -52,6 +60,10 @@ func supplyError(c *gin.Context, err error) {
 }
 
 func SupplyTargets(c *gin.Context) {
+	if !canViewSupplyTargets(c) {
+		supplyError(c, errSupplyForbidden)
+		return
+	}
 	var targets []model.SupplyTarget
 	if err := model.DB.Omit("secret").Order("name").Find(&targets).Error; err != nil {
 		supplyError(c, err)
@@ -211,9 +223,28 @@ func ListSupplyResources(c *gin.Context) {
 		supplyError(c, err)
 		return
 	}
+	type resourceView struct {
+		model.SupplyResource
+		Assigned bool `json:"assigned"`
+	}
+	showTargets := canViewSupplyTargets(c)
+	result := make([]resourceView, len(rows))
 	ids := make([]string, 0, len(rows))
-	for _, r := range rows {
-		if r.ActiveID != "" {
+	for i, r := range rows {
+		assigned := r.Target != ""
+		if !showTargets {
+			r.Target = ""
+			r.UserID = 0
+			r.CustomerGroup = ""
+			if r.DirectState != model.SupplyAwaitRevocation {
+				r.ActiveID = ""
+			}
+			if r.LastError != "" {
+				r.LastError = "Operation failed"
+			}
+		}
+		result[i] = resourceView{SupplyResource: r, Assigned: assigned}
+		if showTargets && r.ActiveID != "" {
 			ids = append(ids, r.ActiveID)
 		}
 	}
@@ -227,11 +258,11 @@ func ListSupplyResources(c *gin.Context) {
 		for i := range current {
 			byID[current[i].ID] = &current[i]
 		}
-		for i := range rows {
-			rows[i].Effective = byID[rows[i].ActiveID]
+		for i := range result {
+			result[i].Effective = byID[result[i].ActiveID]
 		}
 	}
-	common.ApiSuccess(c, rows)
+	common.ApiSuccess(c, result)
 }
 
 func SaveSupplyResource(c *gin.Context) {
@@ -308,6 +339,10 @@ func SaveSupplyResource(c *gin.Context) {
 }
 
 func AssignSupply(c *gin.Context) {
+	if !canViewSupplyTargets(c) {
+		supplyError(c, errSupplyForbidden)
+		return
+	}
 	var req struct {
 		CustomerGroup string `json:"customer_group"`
 		Scope         string `json:"scope"`
@@ -423,6 +458,12 @@ func SupplyHistory(c *gin.Context) {
 		supplyError(c, err)
 		return
 	}
+	if !canViewSupplyTargets(c) {
+		for i := range events {
+			events[i].Target = ""
+			events[i].UserID = 0
+		}
+	}
 	common.ApiSuccess(c, events)
 }
 func SupplyUsage(c *gin.Context) {
@@ -440,7 +481,13 @@ func SupplyUsage(c *gin.Context) {
 	}
 	savedDays := model.DB.Model(&model.SupplyWindow{}).Select("assignment_id").Where("day BETWEEN ? AND ?", from, to)
 	q := model.DB.Where("resource_id = ? AND (user_id > 0 OR account_api = ?) AND started < ?", resource.ID, model.SupplyAPIOfficial, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
-	if uid := c.Query("user_id"); uid != "" {
+	showTargets := canViewSupplyTargets(c)
+	uid, target := c.Query("user_id"), c.Query("target")
+	if !showTargets && (uid != "" || target != "") {
+		supplyError(c, errSupplyForbidden)
+		return
+	}
+	if uid != "" {
 		v, e := strconv.Atoi(uid)
 		if e != nil || v <= 0 {
 			supplyError(c, model.ErrSupplyInput)
@@ -448,7 +495,7 @@ func SupplyUsage(c *gin.Context) {
 		}
 		q = q.Where("user_id = ?", v)
 	}
-	if target := c.Query("target"); target != "" {
+	if target != "" {
 		q = q.Where("target = ?", target)
 	}
 	var assignments []model.SupplyAssignment
@@ -517,7 +564,11 @@ func SupplyUsage(c *gin.Context) {
 					continue
 				}
 				if name := c.Query("model"); name == "" || name == v.ModelName {
-					rows = append(rows, entry{v, day, a.Target, a.UserID, a.ChannelID})
+					row := entry{SupplyConsumption: v, Day: day}
+					if showTargets {
+						row.Target, row.UserID, row.ChannelID = a.Target, a.UserID, a.ChannelID
+					}
+					rows = append(rows, row)
 				}
 			}
 		}
@@ -663,12 +714,17 @@ func DirectProviderUsage(c *gin.Context) {
 		Current bool   `json:"current"`
 	}
 	result := make([]sample, 0, len(rows))
+	showTargets := canViewSupplyTargets(c)
 	for _, a := range rows {
 		fresh := false
 		if a.Ended == 0 && a.ID == r.ActiveID {
 			fresh = service.RefreshDirectProviderQuota(c.Request.Context(), &a) == nil
 		}
-		result = append(result, sample{a.Target, a.ProviderQuota, a.QuotaAt, fresh})
+		row := sample{Used: a.ProviderQuota, At: a.QuotaAt, Current: fresh}
+		if showTargets {
+			row.Target = a.Target
+		}
+		result = append(result, row)
 	}
 	common.ApiSuccess(c, result)
 }

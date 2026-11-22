@@ -56,17 +56,18 @@ export function SupplyPage() {
   const canWrite = admin && hasPermission(user, 'channel', 'write')
   const canOperate = admin && hasPermission(user, 'channel', 'operate')
   const sensitive = admin && hasPermission(user, 'channel', 'sensitive_write')
+  const canViewTargets = canRead && sensitive
   const qc = useQueryClient()
   const [view, setView] = useState<View>()
   const resources = useQuery({
-    queryKey: ['supply', 'resources', user?.id],
+    queryKey: ['supply', 'resources', user?.id, canViewTargets],
     queryFn: () => supplyRequest<SupplyResource[]>('resources'),
     refetchInterval: 5000,
   })
   const targets = useQuery({
-    queryKey: ['supply', 'targets', user?.id],
+    queryKey: ['supply', 'targets', user?.id, canViewTargets],
     queryFn: () => supplyRequest<SupplyTarget[]>('targets'),
-    enabled: canRead,
+    enabled: canViewTargets,
   })
   const close = () => setView(undefined)
   const saved = () => {
@@ -111,7 +112,7 @@ export function SupplyPage() {
           {t('Supplier channels')}
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
-          {sensitive && canRead && (
+          {canViewTargets && (
             <Button
               variant='outline'
               onClick={() => setView({ kind: 'targets' })}
@@ -136,27 +137,34 @@ export function SupplyPage() {
                 cell: (x) => x.supplier_id,
               },
               { id: 'models', header: t('Models'), cell: (x) => x.models },
-              {
-                id: 'user',
-                header: t('Target'),
-                cell: (x) =>
-                  x.target ? targetLabel(x.target, x.user_id) : '—',
-              },
-              {
-                id: 'effective',
-                header: t('Confirmed target'),
-                cell: (x) =>
-                  x.effective
-                    ? [
-                        targetLabel(x.effective.target, x.effective.user_id),
-                        x.effective.channel_id > 0
-                          ? `#${x.effective.channel_id}`
-                          : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')
-                    : '—',
-              },
+              ...(canViewTargets
+                ? [
+                    {
+                      id: 'user',
+                      header: t('Target'),
+                      cell: (x: SupplyResource) =>
+                        x.target ? targetLabel(x.target, x.user_id) : '—',
+                    },
+                    {
+                      id: 'effective',
+                      header: t('Confirmed target'),
+                      cell: (x: SupplyResource) =>
+                        x.effective
+                          ? [
+                              targetLabel(
+                                x.effective.target,
+                                x.effective.user_id
+                              ),
+                              x.effective.channel_id > 0
+                                ? `#${x.effective.channel_id}`
+                                : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')
+                          : '—',
+                    },
+                  ]
+                : []),
               {
                 id: 'version',
                 header: t('Version'),
@@ -176,11 +184,15 @@ export function SupplyPage() {
                     return t('Ready for handoff')
                   }
                   if (x.last_error) {
-                    return `${t('Sync failed')} · ${t(x.last_error)}`
+                    return canViewTargets
+                      ? `${t('Sync failed')} · ${t(x.last_error)}`
+                      : t('Sync failed')
                   }
                   if (x.applied !== x.revision) return t('Pending')
                   if (x.archived) return t('Archived')
-                  return x.target ? t('Applied') : t('Unassigned')
+                  return (x.assigned ?? !!x.target)
+                    ? t('Applied')
+                    : t('Unassigned')
                 },
               },
               {
@@ -236,7 +248,7 @@ export function SupplyPage() {
                             {t('Edit')}
                           </Button>
                         )}
-                        {canWrite && canRead && (
+                        {canWrite && canViewTargets && (
                           <Button
                             size='sm'
                             variant='outline'
@@ -248,7 +260,7 @@ export function SupplyPage() {
                           </Button>
                         )}
                         {(x.supplier_id === user?.id || canOperate) &&
-                          x.target && (
+                          (x.assigned ?? !!x.target) && (
                             <Button
                               size='sm'
                               variant='outline'
@@ -301,14 +313,14 @@ export function SupplyPage() {
           saved={saved}
         />
       )}
-      {view?.kind === 'targets' && (
+      {canViewTargets && view?.kind === 'targets' && (
         <TargetEditor
           targets={targets.data ?? []}
           close={close}
           saved={saved}
         />
       )}
-      {r && view?.kind === 'assign' && (
+      {r && canViewTargets && canWrite && view?.kind === 'assign' && (
         <AssignmentEditor
           resource={r}
           targets={targets.data ?? []}
@@ -321,6 +333,7 @@ export function SupplyPage() {
           resource={r}
           targets={targets.data ?? []}
           history={view.kind === 'history'}
+          canViewTargets={canViewTargets}
           close={close}
         />
       )}

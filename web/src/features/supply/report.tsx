@@ -40,6 +40,7 @@ import {
 export function SupplyReport(props: {
   resource: SupplyResource
   history: boolean
+  canViewTargets: boolean
   targets: SupplyTarget[]
   close: () => void
 }) {
@@ -60,22 +61,28 @@ export function SupplyReport(props: {
   const params = new URLSearchParams({
     from: String(start),
     to: String(end),
-    user_id: uid,
+    ...(props.canViewTargets ? { user_id: uid, target } : {}),
     model,
-    target,
   })
   const usage = useQuery({
-    queryKey: ['supply', 'usage', viewer, id, params.toString()],
+    queryKey: [
+      'supply',
+      'usage',
+      viewer,
+      props.canViewTargets,
+      id,
+      params.toString(),
+    ],
     queryFn: () => supplyRequest<SupplyUsage>(`${base}usage?${params}`),
     enabled: !props.history && valid,
   })
   const history = useQuery({
-    queryKey: ['supply', 'history', viewer, id],
+    queryKey: ['supply', 'history', viewer, props.canViewTargets, id],
     queryFn: () => supplyRequest<SupplyEvent[]>(`${base}history`),
     enabled: props.history,
   })
   const provider = useQuery({
-    queryKey: ['supply', 'provider-usage', viewer, id],
+    queryKey: ['supply', 'provider-usage', viewer, props.canViewTargets, id],
     queryFn: () =>
       supplyRequest<
         {
@@ -139,12 +146,20 @@ export function SupplyReport(props: {
               header: t('Operator'),
               cell: (r) => r.actor || t('System'),
             },
-            {
-              id: 'target',
-              header: t('Target'),
-              cell: (r) => targetName(r.target),
-            },
-            { id: 'user', header: t('User ID'), cell: (r) => r.user_id || '—' },
+            ...(props.canViewTargets
+              ? [
+                  {
+                    id: 'target',
+                    header: t('Target'),
+                    cell: (r: SupplyEvent) => targetName(r.target),
+                  },
+                  {
+                    id: 'user',
+                    header: t('User ID'),
+                    cell: (r: SupplyEvent) => r.user_id || '—',
+                  },
+                ]
+              : []),
             { id: 'version', header: t('Version'), cell: (r) => r.revision },
           ]}
         />
@@ -166,11 +181,15 @@ export function SupplyReport(props: {
               <StaticDataTable
                 data={provider.data}
                 columns={[
-                  {
-                    id: 'target',
-                    header: t('Target'),
-                    cell: (r) => targetName(r.target),
-                  },
+                  ...(props.canViewTargets
+                    ? [
+                        {
+                          id: 'target',
+                          header: t('Target'),
+                          cell: (r: { target: string }) => targetName(r.target),
+                        },
+                      ]
+                    : []),
                   {
                     id: 'quota',
                     header: t('Used Quota'),
@@ -225,15 +244,17 @@ export function SupplyReport(props: {
                     onChange={(e) => setTo(e.target.value)}
                   />
                 </Label>
-                <Label>
-                  {t('User ID')}
-                  <Input
-                    type='number'
-                    min='1'
-                    value={uid}
-                    onChange={(e) => setUid(e.target.value)}
-                  />
-                </Label>
+                {props.canViewTargets && (
+                  <Label>
+                    {t('User ID')}
+                    <Input
+                      type='number'
+                      min='1'
+                      value={uid}
+                      onChange={(e) => setUid(e.target.value)}
+                    />
+                  </Label>
+                )}
                 <Label>
                   {t('Model')}
                   <Input
@@ -241,21 +262,23 @@ export function SupplyReport(props: {
                     onChange={(e) => setModel(e.target.value)}
                   />
                 </Label>
-                <Label>
-                  {t('Target')}
-                  <Input
-                    list='supply-report-targets'
-                    value={target}
-                    onChange={(e) => setTarget(e.target.value)}
-                  />
-                  <datalist id='supply-report-targets'>
-                    {props.targets.map((x) => (
-                      <option key={x.id} value={x.id}>
-                        {x.name}
-                      </option>
-                    ))}
-                  </datalist>
-                </Label>
+                {props.canViewTargets && (
+                  <Label>
+                    {t('Target')}
+                    <Input
+                      list='supply-report-targets'
+                      value={target}
+                      onChange={(e) => setTarget(e.target.value)}
+                    />
+                    <datalist id='supply-report-targets'>
+                      {props.targets.map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.name}
+                        </option>
+                      ))}
+                    </datalist>
+                  </Label>
+                )}
                 <Button
                   disabled={!valid || usage.isFetching}
                   onClick={() => void usage.refetch()}
@@ -302,27 +325,38 @@ export function SupplyReport(props: {
                     cell: (r) =>
                       new Date(r.day * 1000).toISOString().slice(0, 10),
                   },
-                  {
-                    id: 'target',
-                    header: t('Target'),
-                    cell: (r) => targetName(r.target),
-                  },
-                  {
-                    id: 'uid',
-                    header: t('User ID'),
-                    cell: (r) => r.user_id || '—',
-                  },
+                  ...(props.canViewTargets
+                    ? [
+                        {
+                          id: 'target',
+                          header: t('Target'),
+                          cell: (r: SupplyUsage['rows'][number]) =>
+                            targetName(r.target),
+                        },
+                        {
+                          id: 'uid',
+                          header: t('User ID'),
+                          cell: (r: SupplyUsage['rows'][number]) =>
+                            r.user_id || '—',
+                        },
+                      ]
+                    : []),
                   { id: 'model', header: t('Model'), cell: (r) => r.model },
                   {
                     id: 'records',
                     header: t('Records'),
                     cell: (r) => formatNumber(r.records, locale),
                   },
-                  {
-                    id: 'channel',
-                    header: t('Channel ID'),
-                    cell: (r) => formatNumber(r.channel_id, locale),
-                  },
+                  ...(props.canViewTargets
+                    ? [
+                        {
+                          id: 'channel',
+                          header: t('Channel ID'),
+                          cell: (r: SupplyUsage['rows'][number]) =>
+                            formatNumber(r.channel_id, locale),
+                        },
+                      ]
+                    : []),
                   {
                     id: 'quota',
                     header: t('Used Quota'),

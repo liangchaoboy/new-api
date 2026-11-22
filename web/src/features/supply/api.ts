@@ -27,6 +27,7 @@ export type SupplyResource = {
   type: number
   base_url: string
   target: string
+  assigned?: boolean
   user_id: number
   revision: number
   applied: number
