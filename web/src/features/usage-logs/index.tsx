@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
-import { useCallback, useMemo } from 'react'
+import { lazy, Suspense, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
@@ -42,10 +42,17 @@ import {
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 const TASK_LOG_SECTIONS = ['drawing', 'task'] as const
+const CONSUMPTION_SECTIONS = ['common', 'supply'] as const
+const LazySupplierUsageView = lazy(() =>
+  import('../supply/usage-view').then((m) => ({ default: m.SupplierUsageView }))
+)
 
 const SECTION_META: Record<UsageLogsSectionId, { titleKey: string }> = {
   common: {
     titleKey: 'Common Logs',
+  },
+  supply: {
+    titleKey: 'Supplied channel usage',
   },
   drawing: {
     titleKey: 'Drawing Logs',
@@ -117,19 +124,21 @@ function UsageLogsContent() {
     [setViewScope]
   )
 
-  const pageMeta =
-    activeCategory === 'common' ? SECTION_META.common : SECTION_META.task
-  const showTaskSwitcher =
-    activeCategory !== 'common' && visibleSections.length > 1
+  const isConsumption =
+    activeCategory === 'common' || activeCategory === 'supply'
+  const tabSections = isConsumption ? CONSUMPTION_SECTIONS : visibleSections
+  const pageMeta = isConsumption
+    ? SECTION_META[activeCategory]
+    : SECTION_META.task
 
   return (
     <>
-      <SectionPageLayout fixedContent>
+      <SectionPageLayout fixedContent={activeCategory !== 'supply'}>
         <SectionPageLayout.Title>
           {t(pageMeta.titleKey)}
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
-          {canManageScope && (
+          {canManageScope && activeCategory !== 'supply' && (
             <Tabs value={viewScope} onValueChange={handleViewScopeChange}>
               <TabsList>
                 <TabsTrigger value='all'>{t('All')}</TabsTrigger>
@@ -140,10 +149,10 @@ function UsageLogsContent() {
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
           <div className='flex h-full min-h-0 flex-col gap-4'>
-            {showTaskSwitcher && (
+            {tabSections.length > 1 && (
               <Tabs value={activeCategory} onValueChange={handleSectionChange}>
                 <TabsList className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'>
-                  {visibleSections.map((section) => (
+                  {tabSections.map((section) => (
                     <TabsTrigger key={section} value={section}>
                       {t(SECTION_META[section].titleKey)}
                     </TabsTrigger>
@@ -152,7 +161,13 @@ function UsageLogsContent() {
               </Tabs>
             )}
             <div className='min-h-0 flex-1'>
-              <UsageLogsTable logCategory={activeCategory} />
+              {activeCategory === 'supply' ? (
+                <Suspense fallback={t('Loading...')}>
+                  <LazySupplierUsageView />
+                </Suspense>
+              ) : (
+                <UsageLogsTable logCategory={activeCategory} />
+              )}
             </div>
           </div>
         </SectionPageLayout.Content>

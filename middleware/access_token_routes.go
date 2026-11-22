@@ -46,6 +46,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/supply/resources/:id/delivery":      accessTokenSessionRule,
 	"POST /api/supply/resources/:id/revocation":    accessTokenSessionRule,
 	"GET /api/supply/resources/:id/provider-usage": accessTokenSessionRule,
+	"GET /api/supply/usage":                        accessTokenSessionRule,
 	"GET /api/supply/resources":                    accessTokenSessionRule,
 	"POST /api/supply/resources":                   accessTokenSessionRule,
 	"PUT /api/supply/resources/:id":                accessTokenSessionRule,

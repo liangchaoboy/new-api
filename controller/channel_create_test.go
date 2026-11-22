@@ -898,10 +898,13 @@ func TestCustomerSupplyUncertainWriteAndScopedUsage(t *testing.T) {
 }
 
 func TestSupplyDownstreamIdentityRequiresSensitiveChannelAccess(t *testing.T) {
-	setupTaskPluginBindChannelTest(t)
+	owner := setupChannelCreateTest(t)
 	db := model.DB
-	require.NoError(t, db.AutoMigrate(&model.SupplyResource{}, &model.SupplyTarget{}, &model.SupplyAssignment{}, &model.SupplyEvent{}, &model.SupplyWindow{}))
-	const supplier, manager = 91, 92
+	require.NoError(t, db.AutoMigrate(&model.CasbinRule{}, &model.AuthzRole{}, &model.SupplyResource{}, &model.SupplyTarget{}, &model.SupplyAssignment{}, &model.SupplyEvent{}, &model.SupplyWindow{}))
+	common.IsMasterNode = true
+	require.NoError(t, authz.Init(db))
+	common.IsMasterNode = false
+	supplier, manager := owner+1000000, owner+1000001
 	for _, id := range []int{supplier, manager} {
 		require.NoError(t, authz.SetUserPermissions(id, authz.PermissionsMap{authz.ResourceChannel: {
 			authz.ActionRead: true, authz.ActionWrite: true, authz.ActionSensitiveWrite: id == manager,
@@ -955,5 +958,15 @@ func TestSupplyDownstreamIdentityRequiresSensitiveChannelAccess(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, call(supplier, SupplyUsage, "GET", usagePath+"&target="+target.ID, "").Code)
 	assert.Equal(t, http.StatusForbidden, call(supplier, SupplyUsage, "GET", usagePath+"&user_id=9017", "").Code)
 	assert.Contains(t, call(manager, SupplyUsage, "GET", usagePath+"&target="+target.ID, "").Body.String(), `"records":3`)
+	own := call(supplier, MySupplyUsage, "GET", usagePath, "")
+	assert.Equal(t, http.StatusOK, own.Code)
+	assert.Contains(t, own.Body.String(), `"channel":"Visible supply"`)
+	assert.Contains(t, own.Body.String(), `"records":3`)
+	for _, private := range []string{target.ID, target.Name, `"target"`, `"user_id"`, `"channel_id"`} {
+		assert.NotContains(t, own.Body.String(), private)
+	}
+	others := call(manager, MySupplyUsage, "GET", usagePath, "")
+	assert.Contains(t, others.Body.String(), `"rows":[]`)
+	assert.Equal(t, http.StatusForbidden, call(supplier, MySupplyUsage, "GET", usagePath+"&target="+target.ID, "").Code)
 	assert.Equal(t, http.StatusForbidden, call(supplier, AssignSupply, "PUT", "/", `{"revision":2}`).Code)
 }

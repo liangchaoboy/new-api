@@ -263,7 +263,7 @@ def engine(which, root, binaries, tests):
                         + [
                             str(tests),
                             "-test.run",
-                            "^(TestAssignedChannelSelectionAndRevocation|TestSupplyReceiptAndUsage|TestSupplyReviewSafety|TestDirectSupplyCustomerHandoff|TestDirectSupplyOrdinaryAccountRegistration|TestCustomerSupplyUncertainWriteAndScopedUsage)$",
+                            "^(TestAssignedChannelSelectionAndRevocation|TestSupplyReceiptAndUsage|TestSupplyReviewSafety|TestDirectSupplyCustomerHandoff|TestDirectSupplyOrdinaryAccountRegistration|TestCustomerSupplyUncertainWriteAndScopedUsage|TestSupplyDownstreamIdentityRequiresSensitiveChannelAccess)$",
                             "-test.v",
                         ],
                         env={**env, "TEST_CHANNEL_SQL_DSN": env.get("SQL_DSN", "")},

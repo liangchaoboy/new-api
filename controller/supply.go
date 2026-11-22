@@ -472,6 +472,25 @@ func SupplyUsage(c *gin.Context) {
 		supplyError(c, err)
 		return
 	}
+	reportSupplyUsage(c, resource.ID)
+}
+
+// MySupplyUsage reports only channels supplied by the authenticated account,
+// even when that account can administer other suppliers.
+func MySupplyUsage(c *gin.Context) {
+	reportSupplyUsage(c, "")
+}
+
+type ownSupplyUsageEntry struct {
+	model.SupplyConsumption
+	Day        int64  `json:"day"`
+	ResourceID string `json:"resource_id"`
+	Channel    string `json:"channel"`
+}
+
+func reportSupplyUsage(c *gin.Context, resourceID string) {
+	own := resourceID == ""
+
 	from, e1 := strconv.ParseInt(c.Query("from"), 10, 64)
 	to, e2 := strconv.ParseInt(c.Query("to"), 10, 64)
 	today := common.GetTimestamp() / 86400 * 86400
@@ -480,8 +499,26 @@ func SupplyUsage(c *gin.Context) {
 		return
 	}
 	savedDays := model.DB.Model(&model.SupplyWindow{}).Select("assignment_id").Where("day BETWEEN ? AND ?", from, to)
-	q := model.DB.Where("resource_id = ? AND (user_id > 0 OR account_api = ?) AND started < ?", resource.ID, model.SupplyAPIOfficial, to+86400).Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
-	showTargets := canViewSupplyTargets(c)
+	assignmentsQuery := model.DB.WithContext(c.Request.Context()).Model(&model.SupplyAssignment{}).
+		Where("(user_id > 0 OR account_api = ?)", model.SupplyAPIOfficial)
+	names := map[string]string{}
+	if own {
+		resources := model.DB.Model(&model.SupplyResource{}).Select("id").Where("supplier_id = ?", c.GetInt("id"))
+		assignmentsQuery = assignmentsQuery.Where("resource_id IN (?)", resources)
+		var channels []struct{ ID, Name string }
+		if err := model.DB.WithContext(c.Request.Context()).Model(&model.SupplyResource{}).Select("id", "name").Where("supplier_id = ?", c.GetInt("id")).Find(&channels).Error; err != nil {
+			supplyError(c, err)
+			return
+		}
+		for _, channel := range channels {
+			names[channel.ID] = channel.Name
+		}
+	} else {
+		assignmentsQuery = assignmentsQuery.Where("resource_id = ?", resourceID)
+	}
+	q := assignmentsQuery.Session(&gorm.Session{}).Where("started < ?", to+86400).
+		Where("ended = 0 OR ended >= ? OR id IN (?)", from-86400, savedDays)
+	showTargets := !own && canViewSupplyTargets(c)
 	uid, target := c.Query("user_id"), c.Query("target")
 	if !showTargets && (uid != "" || target != "") {
 		supplyError(c, errSupplyForbidden)
@@ -499,7 +536,7 @@ func SupplyUsage(c *gin.Context) {
 		q = q.Where("target = ?", target)
 	}
 	var assignments []model.SupplyAssignment
-	if err = q.Session(&gorm.Session{}).Order("started,id").Find(&assignments).Error; err != nil {
+	if err := q.Session(&gorm.Session{}).Order("started,id").Find(&assignments).Error; err != nil {
 		supplyError(c, err)
 		return
 	}
@@ -511,6 +548,7 @@ func SupplyUsage(c *gin.Context) {
 		ChannelID int    `json:"channel_id"`
 	}
 	rows := []entry{}
+	ownRows := []ownSupplyUsageEntry{}
 	complete := true
 	asOf := int64(0)
 	var windows []model.SupplyWindow
@@ -527,7 +565,11 @@ func SupplyUsage(c *gin.Context) {
 	for _, w := range windows {
 		cached[windowKey{w.AssignmentID, w.Day}] = w
 	}
+	modelFilter := c.Query("model")
 	for _, a := range assignments {
+		if own && names[a.ResourceID] == "" {
+			continue
+		}
 		for day := max(from, a.Started/86400*86400); day <= to; day += 86400 {
 			if c.Request.Context().Err() != nil {
 				return
@@ -537,7 +579,7 @@ func SupplyUsage(c *gin.Context) {
 			if !recentAssignment && w.Collected == 0 {
 				continue
 			}
-			if recentAssignment && day == today {
+			if !own && recentAssignment && day == today {
 				var err error
 				w, err = service.CollectSupplyWindow(c.Request.Context(), a, day)
 				if err != nil {
@@ -559,11 +601,15 @@ func SupplyUsage(c *gin.Context) {
 				return
 			}
 			for _, v := range values {
-				if c.Query("model") != "" && v.ModelName == "" && a.AccountAPI == model.SupplyAPIOfficial {
+				if modelFilter != "" && v.ModelName == "" && a.AccountAPI == model.SupplyAPIOfficial {
 					complete = false
 					continue
 				}
-				if name := c.Query("model"); name == "" || name == v.ModelName {
+				if modelFilter == "" || modelFilter == v.ModelName {
+					if own {
+						ownRows = append(ownRows, ownSupplyUsageEntry{SupplyConsumption: v, Day: day, ResourceID: a.ResourceID, Channel: names[a.ResourceID]})
+						continue
+					}
 					row := entry{SupplyConsumption: v, Day: day}
 					if showTargets {
 						row.Target, row.UserID, row.ChannelID = a.Target, a.UserID, a.ChannelID
@@ -574,8 +620,12 @@ func SupplyUsage(c *gin.Context) {
 		}
 	}
 	var managed int64
-	if err := model.DB.Model(&model.SupplyAssignment{}).Where("resource_id = ? AND (user_id > 0 OR account_api = ?)", resource.ID, model.SupplyAPIOfficial).Count(&managed).Error; err != nil {
+	if err := assignmentsQuery.Count(&managed).Error; err != nil {
 		supplyError(c, err)
+		return
+	}
+	if own {
+		common.ApiSuccess(c, gin.H{"rows": ownRows, "complete": complete, "as_of": asOf, "has_windows": managed > 0})
 		return
 	}
 	common.ApiSuccess(c, gin.H{"rows": rows, "complete": complete, "as_of": asOf, "has_windows": managed > 0})

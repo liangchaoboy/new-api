@@ -10,6 +10,7 @@ import (
 func registerSupplyRoutes(api *gin.RouterGroup) {
 	group := api.Group("/supply", middleware.DisableCache(), middleware.UserAuth())
 	group.GET("/resources", controller.ListSupplyResources)
+	group.GET("/usage", controller.MySupplyUsage)
 	group.POST("/resources", controller.SaveSupplyResource)
 	group.PUT("/resources/:id", controller.SaveSupplyResource)
 	group.DELETE("/resources/:id", controller.WithdrawSupply)

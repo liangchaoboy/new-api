@@ -109,6 +109,10 @@ const LazyUserCharts = lazy(() =>
   }))
 )
 
+const LazySupplierUsageView = lazy(() =>
+  import('../supply/usage-view').then((m) => ({ default: m.SupplierUsageView }))
+)
+
 const LazyFlowCharts = lazy(() =>
   import('./components/flow/flow-charts').then((m) => ({
     default: m.FlowCharts,
@@ -190,6 +194,9 @@ const SECTION_META: Record<DashboardSectionId, { titleKey: string }> = {
   },
   flow: {
     titleKey: 'Flow',
+  },
+  supply: {
+    titleKey: 'Supplied channel usage',
   },
   users: {
     titleKey: 'User Analytics',
@@ -395,6 +402,11 @@ export function Dashboard() {
                 </Suspense>
               </FadeIn>
             </>
+          )}
+          {activeSection === 'supply' && (
+            <Suspense fallback={<LogStatCardsFallback />}>
+              <LazySupplierUsageView summary />
+            </Suspense>
           )}
           {activeSection === 'users' && (
             <FadeIn>

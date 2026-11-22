@@ -73,6 +73,16 @@ export type SupplyUsage = {
   }[]
 }
 
+export type MySupplyUsage = Omit<SupplyUsage, 'rows'> & {
+  rows: (Omit<
+    SupplyUsage['rows'][number],
+    'target' | 'user_id' | 'channel_id'
+  > & {
+    resource_id: string
+    channel: string
+  })[]
+}
+
 export async function supplyRequest<T>(
   path: string,
   method = 'GET',

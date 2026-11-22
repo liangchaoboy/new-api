@@ -323,6 +323,13 @@ def run(reseller, stock, test_clickhouse=False):
         count(resources[0], targets[1], center.admin, 6)
         count(resources[0], "", center.admin, 16)
         count(resources[0], "", suppliers[0], 16)
+        my_usage = f"/api/supply/usage?from={day}&to={day}"
+        for user, expected in ((suppliers[0], 16), (suppliers[1], 1), (center.admin, 0)):
+            result = center.api(my_usage, user=user)
+            assert result["complete"] and sum(row["records"] for row in result["rows"]) == expected
+            assert all(
+                not {"target", "user_id", "channel_id"} & row.keys() for row in result["rows"]
+            )
         center.api(
             other_path + "?revision=" + str(center.row(resources[0])["revision"]),
             "DELETE",
