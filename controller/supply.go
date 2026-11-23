@@ -493,7 +493,8 @@ func reportSupplyUsage(c *gin.Context, resourceID string) {
 
 	from, e1 := strconv.ParseInt(c.Query("from"), 10, 64)
 	to, e2 := strconv.ParseInt(c.Query("to"), 10, 64)
-	today := common.GetTimestamp() / 86400 * 86400
+	now := common.GetTimestamp()
+	today := now / 86400 * 86400
 	if e1 != nil || e2 != nil || from <= 0 || to < from || to > today || to-from >= 31*86400 || from%86400 != 0 || to%86400 != 0 {
 		supplyError(c, model.ErrSupplyInput)
 		return
@@ -551,6 +552,7 @@ func reportSupplyUsage(c *gin.Context, resourceID string) {
 	ownRows := []ownSupplyUsageEntry{}
 	complete := true
 	asOf := int64(0)
+	through := min(now, to+86400)
 	var windows []model.SupplyWindow
 	assignmentIDs := q.Session(&gorm.Session{}).Model(&model.SupplyAssignment{}).Select("id")
 	if err := model.DB.WithContext(c.Request.Context()).Where("assignment_id IN (?) AND day BETWEEN ? AND ?", assignmentIDs, from, to).Find(&windows).Error; err != nil {
@@ -592,6 +594,9 @@ func reportSupplyUsage(c *gin.Context, resourceID string) {
 			if w.Collected == 0 {
 				continue
 			}
+			if own && day == today {
+				through = min(through, w.Collected)
+			}
 			if asOf == 0 || w.Collected < asOf {
 				asOf = w.Collected
 			}
@@ -625,7 +630,7 @@ func reportSupplyUsage(c *gin.Context, resourceID string) {
 		return
 	}
 	if own {
-		common.ApiSuccess(c, gin.H{"rows": ownRows, "complete": complete, "as_of": asOf, "has_windows": managed > 0})
+		common.ApiSuccess(c, gin.H{"rows": ownRows, "complete": complete, "as_of": asOf, "through": through, "has_windows": managed > 0})
 		return
 	}
 	common.ApiSuccess(c, gin.H{"rows": rows, "complete": complete, "as_of": asOf, "has_windows": managed > 0})

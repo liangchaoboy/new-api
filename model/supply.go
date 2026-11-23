@@ -94,11 +94,13 @@ type SupplyCommand struct {
 	Key     string       `json:"key"`
 }
 type SupplyConsumption struct {
-	ModelName    string `json:"model"`
-	Records      int64  `json:"records"`
-	Quota        *int64 `json:"quota,omitempty"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
+	ModelName        string `json:"model"`
+	Records          int64  `json:"records"`
+	Quota            *int64 `json:"quota,omitempty"`
+	InputTokens      int64  `json:"input_tokens"`
+	OutputTokens     int64  `json:"output_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
 }
 type SupplyWindow struct {
 	AssignmentID string `gorm:"primaryKey;size:32"`

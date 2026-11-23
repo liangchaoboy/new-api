@@ -839,8 +839,17 @@ func TestCustomerSupplyUncertainWriteAndScopedUsage(t *testing.T) {
 		case "/api/data/channel_daily":
 			assert.Equal(t, "log", req.URL.Query().Get("source"))
 			assert.Equal(t, "0", req.URL.Query().Get("tz_offset"))
-			fmt.Fprintf(w, `{"success":true,"data":[{"channel_id":99,"count":77},{"channel_id":53,"day":%d,"count":2,"prompt_tokens":12,"completion_tokens":3,"quota":4}]}`, day)
+			fmt.Fprintf(w, `{"success":true,"data":[{"channel_id":99,"count":77},{"channel_id":53,"day":%d,"count":2,"prompt_tokens":12,"completion_tokens":3,"quota":4,"cache_read_tokens":0}]}`, day)
 		case "/api/log/":
+			if req.URL.Query().Get("start_timestamp") == fmt.Sprint(day-2*86400) {
+				timestamp := day - 2*86400
+				fmt.Fprintf(w, `{"success":true,"data":{"total":3,"items":[
+                    {"channel":53,"type":2,"created_at":%d,"model_name":"recorded","prompt_tokens":10,"completion_tokens":1,"quota":1,"other":"{\"cache_tokens\":0,\"cache_creation_tokens\":5,\"cache_creation_tokens_5m\":3,\"cache_creation_tokens_1h\":2}"},
+                    {"channel":53,"type":2,"created_at":%d,"model_name":"recorded","prompt_tokens":10,"completion_tokens":1,"quota":1,"other":{"cache_tokens":2,"cache_write_tokens":7,"cache_creation_tokens_12h":4}},
+                    {"channel":53,"type":2,"created_at":%d,"model_name":"read-only","prompt_tokens":10,"completion_tokens":1,"quota":1,"other":"{\"cache_tokens\":0}"}
+                ]}}`, timestamp, timestamp, timestamp)
+				return
+			}
 			// A misconfigured server ignores the channel filter.
 			fmt.Fprintf(w, `{"success":true,"data":{"total":1,"items":[{"channel":99,"type":2,"created_at":%d,"model_name":"demo","prompt_tokens":1,"completion_tokens":1,"quota":1}]}}`, day)
 		default:
@@ -883,10 +892,26 @@ func TestCustomerSupplyUncertainWriteAndScopedUsage(t *testing.T) {
 	var rows []model.SupplyConsumption
 	require.NoError(t, common.UnmarshalJsonStr(window.Content, &rows))
 	quota := int64(4)
-	assert.Equal(t, []model.SupplyConsumption{{Records: 2, InputTokens: 12, OutputTokens: 3, Quota: &quota}}, rows)
+	assert.Equal(t, []model.SupplyConsumption{{Records: 2, InputTokens: 12, OutputTokens: 3, Quota: &quota, CacheReadTokens: new(int64)}}, rows)
 	require.NoError(t, db.Model(&target).Update("usage_api", "channel_logs").Error)
 	_, err = service.CollectSupplyWindow(t.Context(), assignment, day-86400)
 	require.Error(t, err)
+	window, err = service.CollectSupplyWindow(t.Context(), assignment, day-2*86400)
+	require.NoError(t, err)
+	require.NoError(t, common.UnmarshalJsonStr(window.Content, &rows))
+	var byModel = make(map[string]model.SupplyConsumption, len(rows))
+	for _, row := range rows {
+		byModel[row.ModelName] = row
+	}
+	require.Contains(t, byModel, "recorded")
+	require.NotNil(t, byModel["recorded"].CacheReadTokens)
+	require.NotNil(t, byModel["recorded"].CacheWriteTokens)
+	assert.EqualValues(t, 2, *byModel["recorded"].CacheReadTokens)
+	assert.EqualValues(t, 12, *byModel["recorded"].CacheWriteTokens)
+	require.Contains(t, byModel, "read-only")
+	require.NotNil(t, byModel["read-only"].CacheReadTokens)
+	assert.Zero(t, *byModel["read-only"].CacheReadTokens)
+	assert.Nil(t, byModel["read-only"].CacheWriteTokens)
 	// If the account temporarily loses sight of a channel, reassignment must wait.
 	visible.Store(false)
 	require.NoError(t, db.Model(&r).Updates(map[string]any{"target": "", "revision": 3}).Error)

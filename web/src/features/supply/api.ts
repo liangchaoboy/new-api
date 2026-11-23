@@ -69,11 +69,14 @@ export type SupplyUsage = {
     records: number
     input_tokens: number
     quota?: number
+    cache_read_tokens?: number
+    cache_write_tokens?: number
     output_tokens: number
   }[]
 }
 
 export type MySupplyUsage = Omit<SupplyUsage, 'rows'> & {
+  through: number
   rows: (Omit<
     SupplyUsage['rows'][number],
     'target' | 'user_id' | 'channel_id'

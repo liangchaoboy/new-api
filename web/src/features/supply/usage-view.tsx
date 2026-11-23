@@ -73,11 +73,39 @@ export function SupplierUsageView(props: {
     },
     { records: 0, input: 0, output: 0 }
   )
+  const minutes = ((usage.data?.through ?? start) - start) / 60
+  const rateFormat = new Intl.NumberFormat(locale, { maximumFractionDigits: 5 })
+  const noData = t('No data')
+  const rate = (value: number) =>
+    usage.data?.complete && minutes > 0
+      ? rateFormat.format(value / minutes)
+      : noData
+  const cacheTotal = (field: 'cache_read_tokens' | 'cache_write_tokens') => {
+    const consumed = rows.filter((row) => row.records > 0)
+    if (
+      !consumed.length ||
+      !usage.data?.complete ||
+      consumed.some((row) => row[field] == null)
+    ) {
+      return noData
+    }
+    return formatNumber(
+      consumed.reduce((total, row) => total + (row[field] ?? 0), 0),
+      locale
+    )
+  }
   const cards = [
-    { label: t('Records'), value: totals.records },
-    { label: t('Input tokens'), value: totals.input },
-    { label: t('Output tokens'), value: totals.output },
-    { label: t('Total Tokens'), value: totals.input + totals.output },
+    { label: t('Records'), value: formatNumber(totals.records, locale) },
+    { label: t('Input tokens'), value: formatNumber(totals.input, locale) },
+    { label: t('Output tokens'), value: formatNumber(totals.output, locale) },
+    {
+      label: t('Total Tokens'),
+      value: formatNumber(totals.input + totals.output, locale),
+    },
+    { label: t('Cache Read'), value: cacheTotal('cache_read_tokens') },
+    { label: t('Cache Write'), value: cacheTotal('cache_write_tokens') },
+    { label: t('Average RPM'), value: rate(totals.records) },
+    { label: t('Average TPM'), value: rate(totals.input + totals.output) },
   ]
   const showSummary = usage.data && (usage.data.complete || rows.length > 0)
   const summaryCards = showSummary && (
@@ -88,7 +116,7 @@ export function SupplierUsageView(props: {
             <CardTitle>{card.label}</CardTitle>
           </CardHeader>
           <CardContent className='text-2xl font-semibold tabular-nums'>
-            {formatNumber(card.value, locale)}
+            {card.value}
           </CardContent>
         </Card>
       ))}
@@ -206,6 +234,22 @@ export function SupplierUsageView(props: {
               id: 'output',
               header: t('Output tokens'),
               cell: (r) => formatNumber(r.output_tokens, locale),
+            },
+            {
+              id: 'cache-read',
+              header: t('Cache Read'),
+              cell: (r) =>
+                r.cache_read_tokens == null
+                  ? noData
+                  : formatNumber(r.cache_read_tokens, locale),
+            },
+            {
+              id: 'cache-write',
+              header: t('Cache Write'),
+              cell: (r) =>
+                r.cache_write_tokens == null
+                  ? noData
+                  : formatNumber(r.cache_write_tokens, locale),
             },
             {
               id: 'quota',
