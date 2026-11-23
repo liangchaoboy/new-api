@@ -28,7 +28,7 @@ import { ResourceEditor } from '../editor'
 
 vi.mock('../api', () => ({ supplyRequest: vi.fn() }))
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en' } }),
 }))
 it('preserves the stored credential when saving an edited resource with an empty key', async () => {
   const user = userEvent.setup()
@@ -232,3 +232,47 @@ it.each(['customer_account', 'direct'])(
     )
   }
 )
+
+it('shows averages for synced minutes and distinguishes zero cache from an omitted field', async () => {
+  const { SupplierUsageView } = await import('../usage-view')
+  useAuthStore.getState().auth.setUser({ id: 8, username: 'supplier', role: 1 })
+  try {
+    vi.mocked(supplyRequest).mockImplementation(async (path) => {
+      const start = Number(
+        new URL(path, 'https://fixture.invalid/').searchParams.get('from')
+      )
+      return {
+        as_of: start + 100 * 60,
+        through: start + 100 * 60,
+        has_windows: true,
+        complete: true,
+        rows: [
+          {
+            resource_id: 'c',
+            channel: 'fixture',
+            day: start,
+            model: 'demo',
+            records: 5,
+            input_tokens: 59,
+            output_tokens: 800,
+            cache_read_tokens: 0,
+          },
+        ],
+      }
+    })
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <SupplierUsageView summary compact />
+      </QueryClientProvider>
+    )
+    const card = (title: string) =>
+      screen.getByText(title).closest('[data-slot="card"]')
+    await screen.findByText('Average RPM')
+    expect(card('Average RPM')).toHaveTextContent('0.05')
+    expect(card('Average TPM')).toHaveTextContent('8.59')
+    expect(card('Cache Read')).toHaveTextContent('0')
+    expect(card('Cache Write')).toHaveTextContent('No data')
+  } finally {
+    useAuthStore.getState().auth.setUser(null)
+  }
+})
